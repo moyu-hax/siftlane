@@ -465,7 +465,9 @@ function publicState() {
 function appendCoreLog(line) {
   const text = stripAnsi(line).trim();
   if (!text || /read http request: EOF/i.test(text)) return;
-  core.logs.push({ at: new Date().toISOString(), line: text });
+  const entry = { at: new Date().toISOString(), line: text };
+  core.logs.push(entry);
+  console.log(`[${entry.at}] ${text}`);
   if (core.logs.length > MAX_LOG_LINES) {
     core.logs.splice(0, core.logs.length - MAX_LOG_LINES);
   }

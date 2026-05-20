@@ -8,6 +8,8 @@ BINARY_PATH="${INSTALL_DIR}/siftlane"
 DATA_DIR="${SIFTLANE_DATA_DIR:-${ROOT_DIR}/data}"
 DOWNLOAD_DIR="${ROOT_DIR}/downloads"
 EXTRACT_DIR="${ROOT_DIR}/artifact"
+LOG_DIR="${SIFTLANE_LOG_DIR:-${ROOT_DIR}/logs}"
+LOG_FILE="${SIFTLANE_LOG_FILE:-${LOG_DIR}/siftlane.log}"
 ENV_FILE="/etc/default/${SERVICE_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 HOST="${SIFTLANE_HOST:-0.0.0.0}"
@@ -292,6 +294,7 @@ write_env() {
 SIFTLANE_HOST=${HOST}
 SIFTLANE_PORT=${PORT}
 SIFTLANE_DATA_DIR=${DATA_DIR}
+SIFTLANE_LOG_FILE=${LOG_FILE}
 SING_BOX_PATH=${sing_box_path}
 EOF
 }
@@ -308,6 +311,8 @@ Type=simple
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=${ENV_FILE}
 ExecStart=${BINARY_PATH}
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
@@ -326,7 +331,8 @@ install_or_update() {
     FORCE_DOWNLOAD=1
   fi
 
-  mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DOWNLOAD_DIR}"
+  mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DOWNLOAD_DIR}" "${LOG_DIR}"
+  touch "${LOG_FILE}"
 
   if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1; then
     systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -350,8 +356,8 @@ install_or_update() {
 
   write_env
   write_service
-  chmod 755 "${INSTALL_DIR}" "${DATA_DIR}"
-  chmod 644 "${ENV_FILE}" "${SERVICE_FILE}"
+  chmod 755 "${INSTALL_DIR}" "${DATA_DIR}" "${LOG_DIR}"
+  chmod 644 "${ENV_FILE}" "${SERVICE_FILE}" "${LOG_FILE}"
 
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}"
@@ -367,11 +373,12 @@ install_or_update() {
   echo "安装目录：${ROOT_DIR}"
   echo "程序文件：${BINARY_PATH}"
   echo "数据目录：${DATA_DIR}"
+  echo "日志文件：${LOG_FILE}"
   echo "临时文件：已清理下载缓存和解压目录"
   echo "常用命令："
   echo "  systemctl status ${SERVICE_NAME}"
   echo "  systemctl restart ${SERVICE_NAME}"
-  echo "  journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
+  echo "  tail -n 100 ${LOG_FILE}"
 }
 
 show_status() {
@@ -379,7 +386,19 @@ show_status() {
 }
 
 show_logs() {
-  journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
+  if [[ -f "${LOG_FILE}" ]]; then
+    tail -n 100 "${LOG_FILE}"
+  else
+    echo "未找到 Siftlane 日志文件：${LOG_FILE}"
+    journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
+  fi
+}
+
+cleanup_service_logs() {
+  mkdir -p "${LOG_DIR}"
+  : > "${LOG_FILE}"
+  chmod 644 "${LOG_FILE}"
+  echo "已清理 Siftlane 服务日志：${LOG_FILE}"
 }
 
 uninstall() {
@@ -387,14 +406,14 @@ uninstall() {
   rm -f "${SERVICE_FILE}" "${ENV_FILE}" "${BINARY_PATH}"
   systemctl daemon-reload
 
-  read -r -p "是否删除 ${ROOT_DIR}/data 和下载缓存？[y/N]: " remove_data
+  read -r -p "是否删除 ${ROOT_DIR}/data、日志和下载缓存？[y/N]: " remove_data
   if [[ "${remove_data:-N}" =~ ^[Yy]$ ]]; then
-    rm -rf "${DATA_DIR}" "${DOWNLOAD_DIR}" "${EXTRACT_DIR}"
+    rm -rf "${DATA_DIR}" "${DOWNLOAD_DIR}" "${EXTRACT_DIR}" "${LOG_DIR}"
   fi
 }
 
 usage() {
-  echo "用法：bash install-server.sh [install|update|uninstall|status|logs|clean]"
+  echo "用法：bash install-server.sh [install|update|uninstall|status|logs|clean|clean-logs]"
 }
 
 menu() {
@@ -408,6 +427,7 @@ menu() {
   echo "4) 查看状态"
   echo "5) 查看日志"
   echo "6) 清理缓存"
+  echo "7) 清理 Siftlane 服务日志"
   echo "0) 退出"
   read -r -p "请选择 [1]: " choice
   case "${choice:-1}" in
@@ -417,6 +437,7 @@ menu() {
     4) show_status ;;
     5) show_logs ;;
     6) cleanup_cache ;;
+    7) cleanup_service_logs ;;
     0) exit 0 ;;
     *) echo "无效选择"; exit 1 ;;
   esac
@@ -433,6 +454,7 @@ main() {
     status) show_status ;;
     logs) show_logs ;;
     clean|cleanup) cleanup_cache ;;
+    clean-logs|cleanup-logs|clean-service-logs) cleanup_service_logs ;;
     -h|--help|help) usage ;;
     menu|'') menu ;;
     *) usage; exit 1 ;;
