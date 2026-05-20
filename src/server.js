@@ -60,7 +60,11 @@ function defaultState() {
       testUrl: 'http://www.gstatic.com/generate_204',
       testIntervalSec: 300,
       switchPolicy: 'best',
+      switchMode: 'manual',
+      manualNodeId: null,
+      autoSwitchIntervalMin: 10,
       activeGroupId: null,
+      lastSwitchAt: null,
       lastTestAt: null,
       passwordHash: null
     },
@@ -120,10 +124,17 @@ function normalizeState(input) {
   next.settings.testUrl = normalizeString(next.settings.testUrl) || 'http://www.gstatic.com/generate_204';
   next.settings.testIntervalSec = Math.min(86400, Math.max(30, toInt(next.settings.testIntervalSec, 300)));
   next.settings.switchPolicy = ['best', 'random'].includes(next.settings.switchPolicy) ? next.settings.switchPolicy : 'best';
+  next.settings.switchMode = ['manual', 'auto'].includes(next.settings.switchMode) ? next.settings.switchMode : 'manual';
+  next.settings.manualNodeId = normalizeString(next.settings.manualNodeId) || null;
+  next.settings.autoSwitchIntervalMin = Math.min(1440, Math.max(1, toInt(next.settings.autoSwitchIntervalMin, 10)));
   next.settings.passwordHash = normalizeString(next.settings.passwordHash) || null;
+  next.settings.lastSwitchAt = normalizeIso(next.settings.lastSwitchAt);
   next.settings.lastTestAt = normalizeIso(next.settings.lastTestAt);
 
   syncGroups(next);
+  if (next.settings.manualNodeId && !next.nodes.some((node) => node.id === next.settings.manualNodeId)) {
+    next.settings.manualNodeId = null;
+  }
   return next;
 }
 
@@ -169,7 +180,8 @@ function normalizeNode(node) {
     serviceName: normalizeString(node.serviceName || node.service_name),
     pbk: normalizeString(node.pbk),
     sid: normalizeString(node.sid),
-    flow: normalizeString(node.flow)
+    flow: normalizeString(node.flow),
+    fingerprint: normalizeString(node.fingerprint || node.fp)
   };
 }
 
@@ -255,8 +267,77 @@ function applyGroupSelections() {
   state.settings.activeGroupId = active?.id || null;
 }
 
+function getUsableNodes() {
+  return state.nodes.filter(nodeUsable);
+}
+
+function getActiveGroup() {
+  return state.groups.find((group) => group.id === state.settings.activeGroupId) || state.groups[0] || null;
+}
+
+function getManualNode() {
+  const selected = state.nodes.find((node) => node.id === state.settings.manualNodeId);
+  return nodeUsable(selected) ? selected : (getUsableNodes()[0] || null);
+}
+
+function getCurrentOutboundNode() {
+  if (state.settings.switchMode === 'auto') {
+    const activeGroup = getActiveGroup();
+    return activeGroup ? chooseGroupNode(activeGroup) : null;
+  }
+  return getManualNode();
+}
+
+function getNextSwitchAt() {
+  if (state.settings.switchMode !== 'auto' || core.status !== 'running') return null;
+  const activeGroup = getActiveGroup();
+  if (!activeGroup || !getGroupNodes(activeGroup).some(nodeUsable)) return null;
+  const intervalMs = state.settings.autoSwitchIntervalMin * 60 * 1000;
+  const last = state.settings.lastSwitchAt ? Date.parse(state.settings.lastSwitchAt) : Date.now();
+  if (!Number.isFinite(last)) return null;
+  return new Date(last + intervalMs).toISOString();
+}
+
+function rotateActiveGroupSelection() {
+  const group = getActiveGroup();
+  if (!group) return null;
+  const usable = getGroupNodes(group).filter(nodeUsable);
+  if (!usable.length) {
+    group.selectedNodeId = null;
+    return null;
+  }
+  const currentIndex = usable.findIndex((node) => node.id === group.selectedNodeId);
+  const next = usable[(currentIndex + 1 + usable.length) % usable.length] || usable[0];
+  group.selectedNodeId = next.id;
+  return next;
+}
+
+async function runAutoSwitchIfDue() {
+  if (testing || !core.process || state.settings.switchMode !== 'auto') return;
+  const intervalMs = state.settings.autoSwitchIntervalMin * 60 * 1000;
+  const last = state.settings.lastSwitchAt ? Date.parse(state.settings.lastSwitchAt) : 0;
+  if (!Number.isFinite(last) || last <= 0) {
+    state.settings.lastSwitchAt = new Date().toISOString();
+    saveState();
+    return;
+  }
+  if (Date.now() - last < intervalMs) return;
+
+  const before = runtimeSignature();
+  const selected = rotateActiveGroupSelection();
+  state.settings.lastSwitchAt = new Date().toISOString();
+  saveState();
+  const after = runtimeSignature();
+  if (selected) appendCoreLog(`auto switched to ${selected.name}`);
+  if (selected && before !== after) {
+    await restartCore();
+  }
+}
 function runtimeSignature() {
   return JSON.stringify({
+    switchMode: state.settings.switchMode,
+    manualNodeId: state.settings.manualNodeId,
+    autoSwitchIntervalMin: state.settings.autoSwitchIntervalMin,
     activeGroupId: state.settings.activeGroupId,
     groups: state.groups.map((group) => ({
       id: group.id,
@@ -344,6 +425,8 @@ function readJsonBody(req) {
 }
 
 function publicState() {
+  const currentNode = getCurrentOutboundNode();
+  const startedAtMs = core.startedAt ? Date.parse(core.startedAt) : 0;
   return {
     settings: {
       ...state.settings,
@@ -352,11 +435,24 @@ function publicState() {
     },
     nodes: state.nodes,
     groups: state.groups,
+    dashboard: {
+      currentNode: currentNode ? {
+        id: currentNode.id,
+        name: currentNode.name,
+        group: currentNode.group,
+        status: currentNode.status,
+        latencyMs: currentNode.latencyMs
+      } : null,
+      nextSwitchAt: getNextSwitchAt(),
+      uptimeSec: core.status === 'running' && Number.isFinite(startedAtMs) && startedAtMs > 0
+        ? Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000))
+        : 0
+    },
     core: {
       status: core.status,
       startedAt: core.startedAt,
       lastError: core.lastError,
-      logs: core.logs.slice(-60)
+      logs: core.logs.slice(-120)
     },
     testing
   };
@@ -421,6 +517,15 @@ function buildNodeOutbound(node) {
         public_key: node.pbk,
         short_id: node.sid
       };
+      outbound.tls.utls = {
+        enabled: true,
+        fingerprint: node.fingerprint || 'chrome'
+      };
+    } else if (node.fingerprint) {
+      outbound.tls.utls = {
+        enabled: true,
+        fingerprint: node.fingerprint
+      };
     }
   }
 
@@ -456,14 +561,8 @@ function buildRuntimeConfig() {
       interrupt_exist_connections: true
     };
   }).filter(Boolean);
-  const activeGroup = state.groups.find((group) => group.id === state.settings.activeGroupId);
-  const activeGroupHasNodes = activeGroup && getGroupNodes(activeGroup).some(nodeUsable);
-  const activeNode = activeGroup ? chooseGroupNode(activeGroup) : usableNodes[0] || null;
-  const activeOutbound = activeGroupHasNodes
-    ? `grp-${activeGroup.id}`
-    : activeNode
-      ? `out-${activeNode.id}`
-      : 'direct';
+  const activeNode = getCurrentOutboundNode();
+  const activeOutbound = activeNode ? `out-${activeNode.id}` : 'direct';
 
   return {
     log: { level: 'warn' },
@@ -876,6 +975,7 @@ function parseProxyLink(line, groupName = '') {
       pbk: normalizeString(params.get('pbk')),
       sid: normalizeString(params.get('sid')),
       flow: normalizeString(params.get('flow')),
+      fingerprint: normalizeString(params.get('fp') || params.get('fingerprint') || params.get('utls')),
       insecure: ['1', 'true', 'yes'].includes(normalizeString(params.get('allowInsecure') || params.get('insecure')).toLowerCase())
     };
 
@@ -1036,8 +1136,14 @@ async function handleApi(req, res, pathname) {
       testUrl: normalizeString(body.testUrl) || state.settings.testUrl,
       testIntervalSec: body.testIntervalSec == null ? state.settings.testIntervalSec : toInt(body.testIntervalSec, state.settings.testIntervalSec),
       switchPolicy: ['best', 'random'].includes(body.switchPolicy) ? body.switchPolicy : state.settings.switchPolicy,
+      switchMode: ['manual', 'auto'].includes(body.switchMode) ? body.switchMode : state.settings.switchMode,
+      manualNodeId: body.manualNodeId === undefined ? state.settings.manualNodeId : (normalizeString(body.manualNodeId) || null),
+      autoSwitchIntervalMin: body.autoSwitchIntervalMin == null ? state.settings.autoSwitchIntervalMin : toInt(body.autoSwitchIntervalMin, state.settings.autoSwitchIntervalMin),
       activeGroupId: normalizeString(body.activeGroupId) || state.settings.activeGroupId
     };
+    if (body.switchMode === 'auto' || body.activeGroupId !== undefined || body.autoSwitchIntervalMin != null) {
+      state.settings.lastSwitchAt = new Date().toISOString();
+    }
     if (body.password) {
       if (String(body.password).length < 6) throw new Error('Password must be at least 6 characters');
       state.settings.passwordHash = hashPassword(body.password);
@@ -1194,6 +1300,7 @@ const server = http.createServer(async (req, res) => {
 
 setInterval(() => {
   void runAutoTestIfDue();
+  void runAutoSwitchIfDue();
 }, TEST_TICK_MS).unref?.();
 
 process.once('SIGINT', async () => {

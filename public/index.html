@@ -27,64 +27,202 @@
     </section>
   </main>
 
-  <main id="appView" class="app hidden">
-    <header class="topbar">
-      <div class="brand-row">
+  <main id="appView" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand-row sidebar-brand">
         <div class="brand-mark">S</div>
         <div>
           <h1>Siftlane</h1>
-          <p>轻量节点健康网关</p>
+          <p>轻量节点控制面板</p>
         </div>
       </div>
-      <div class="top-actions">
-        <button id="refreshBtn" class="ghost" type="button">刷新</button>
-        <button id="logoutBtn" class="ghost" type="button">退出</button>
+
+      <nav class="sidebar-nav">
+        <button type="button" class="nav-item active" data-nav="dashboard">仪表盘</button>
+        <button type="button" class="nav-item" data-nav="groups">节点组</button>
+        <button type="button" class="nav-item" data-nav="settings">设置</button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <button id="refreshBtn" class="ghost block" type="button">刷新</button>
+        <button id="logoutBtn" class="ghost block" type="button">退出</button>
       </div>
-    </header>
+    </aside>
 
-    <section class="status-grid">
-      <article>
-        <span>核心</span>
-        <strong id="coreStatus">--</strong>
-      </article>
-      <article>
-        <span>可用节点</span>
-        <strong id="healthyCount">0/0</strong>
-      </article>
-      <article>
-        <span>活动分组</span>
-        <strong id="activeGroupName">--</strong>
-      </article>
-      <article>
-        <span>上次测速</span>
-        <strong id="lastTestAt">--</strong>
-      </article>
-    </section>
+    <section class="workspace">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Siftlane</p>
+          <h2 id="pageTitle">仪表盘</h2>
+        </div>
+        <div class="top-actions">
+          <button id="startCoreBtn" class="primary" type="button">启动</button>
+          <button id="stopCoreBtn" type="button">停止</button>
+          <button id="restartCoreBtn" type="button">重启</button>
+          <button id="testAllBtn" type="button">测速</button>
+        </div>
+      </header>
 
-    <section class="toolbar">
-      <button id="startCoreBtn" class="primary" type="button">启动核心</button>
-      <button id="stopCoreBtn" type="button">停止核心</button>
-      <button id="restartCoreBtn" type="button">重启核心</button>
-      <button id="testAllBtn" type="button">全部测速</button>
-    </section>
+      <section id="view-dashboard" class="view">
+        <section class="status-grid">
+          <article>
+            <span>核心</span>
+            <strong id="coreStatus">--</strong>
+          </article>
+          <article>
+            <span>运行时长</span>
+            <strong id="uptimeText">--</strong>
+          </article>
+          <article>
+            <span>可用节点</span>
+            <strong id="healthyCount">0/0</strong>
+          </article>
+          <article>
+            <span>上次测速</span>
+            <strong id="lastTestAt">--</strong>
+          </article>
+        </section>
 
-    <section class="layout">
-      <div class="main-column">
-        <section class="panel">
-          <div class="panel-head">
-            <h2>分组</h2>
-            <form id="groupForm" class="inline-form">
-              <input id="groupName" placeholder="新分组名称">
-              <button type="submit">新增</button>
+        <section class="dashboard-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>切换控制</h3>
+                <p class="muted">手动选择或按分组自动轮换</p>
+              </div>
+              <span id="testingFlag" class="muted"></span>
+            </div>
+
+            <div class="segmented" role="tablist" aria-label="切换模式">
+              <button type="button" id="modeManualBtn" class="segment active" data-switch-mode="manual">自主选择</button>
+              <button type="button" id="modeAutoBtn" class="segment" data-switch-mode="auto">自动切换</button>
+            </div>
+
+            <form id="dashboardForm" class="stack">
+              <div id="manualModePanel" class="mode-panel">
+                <label>
+                  <span>节点出口</span>
+                  <select id="manualNodeSelect"></select>
+                </label>
+                <p class="muted">只显示启用且可用的节点。</p>
+              </div>
+
+              <div id="autoModePanel" class="mode-panel hidden">
+                <label>
+                  <span>节点分组</span>
+                  <select id="autoGroupSelect"></select>
+                </label>
+                <label>
+                  <span>切换间隔（分钟）</span>
+                  <input id="autoIntervalInput" type="number" min="1" max="1440" inputmode="numeric">
+                </label>
+                <p class="muted">只有启用节点才会参与自动切换。</p>
+              </div>
+
+              <button class="primary" type="submit">保存切换设置</button>
             </form>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>当前出口</h3>
+                <p class="muted">系统代理会走这里</p>
+              </div>
+            </div>
+            <div class="summary-stack">
+              <div>
+                <span>节点名称</span>
+                <strong id="currentOutboundName">--</strong>
+              </div>
+              <div>
+                <span>所在分组</span>
+                <strong id="currentOutboundGroup">--</strong>
+              </div>
+              <div>
+                <span>下次切换</span>
+                <strong id="nextSwitchAt">--</strong>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel logs-panel">
+          <div class="panel-head">
+            <div>
+              <h3>日志</h3>
+              <p class="muted">核心和测速记录</p>
+            </div>
           </div>
-          <div id="groupsList" class="group-list"></div>
+          <pre id="logs"></pre>
+        </section>
+      </section>
+
+      <section id="view-groups" class="view hidden">
+        <section class="layout-two">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>节点组</h3>
+                <p class="muted">按节点里的分组名自动同步</p>
+              </div>
+              <form id="groupForm" class="inline-form">
+                <input id="groupName" placeholder="新分组名称">
+                <button type="submit">新增</button>
+              </form>
+            </div>
+            <div id="groupsList" class="group-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>导入 / 新增</h3>
+                <p class="muted">导入节点后会自动带上分组</p>
+              </div>
+            </div>
+
+            <form id="importForm" class="stack">
+              <input id="importGroup" placeholder="导入到分组（可空）">
+              <textarea id="importText" rows="7" placeholder="节点链接，每行一个"></textarea>
+              <button class="primary" type="submit">导入节点</button>
+            </form>
+
+            <form id="nodeForm" class="stack compact">
+              <h4>手动新增节点</h4>
+              <select id="nodeType">
+                <option value="socks">SOCKS</option>
+                <option value="http">HTTP</option>
+                <option value="shadowsocks">Shadowsocks</option>
+                <option value="vless">VLESS</option>
+                <option value="vmess">VMess</option>
+                <option value="trojan">Trojan</option>
+                <option value="hysteria2">Hysteria2</option>
+                <option value="tuic">TUIC</option>
+              </select>
+              <input id="nodeName" placeholder="名称">
+              <input id="nodeGroup" placeholder="分组">
+              <input id="nodeServer" placeholder="服务器">
+              <input id="nodePort" placeholder="端口" inputmode="numeric">
+              <input id="nodeUuid" placeholder="UUID">
+              <input id="nodePassword" placeholder="密码">
+              <input id="nodeMethod" placeholder="加密方法">
+              <input id="nodeSecurity" placeholder="security，例如 tls / reality">
+              <input id="nodeSni" placeholder="SNI">
+              <input id="nodeFingerprint" placeholder="fingerprint，例如 chrome">
+              <input id="nodePbk" placeholder="Reality 公钥 pbk">
+              <input id="nodeSid" placeholder="Reality short id sid">
+              <button type="submit">保存节点</button>
+            </form>
+          </article>
         </section>
 
         <section class="panel">
           <div class="panel-head">
-            <h2>节点</h2>
-            <div class="muted" id="nodeCount">0 个节点</div>
+            <div>
+              <h3>节点列表</h3>
+              <p class="muted" id="nodeCount">0 个节点</p>
+            </div>
           </div>
           <div class="table-wrap">
             <table>
@@ -102,64 +240,53 @@
             </table>
           </div>
         </section>
-      </div>
+      </section>
 
-      <aside class="side-column">
-        <section class="panel">
-          <h2>导入</h2>
-          <form id="importForm" class="stack">
-            <input id="importGroup" placeholder="分组名称">
-            <textarea id="importText" rows="7" placeholder="节点链接，每行一个"></textarea>
-            <button class="primary" type="submit">导入节点</button>
-          </form>
+      <section id="view-settings" class="view hidden">
+        <section class="layout-two">
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>服务设置</h3>
+                <p class="muted">Web、测速和核心路径</p>
+              </div>
+            </div>
+            <form id="settingsForm" class="stack compact">
+              <label><span>sing-box 路径</span><input id="settingSingBox"></label>
+              <label><span>测速地址</span><input id="settingTestUrl"></label>
+              <label><span>测速间隔（秒）</span><input id="settingInterval" type="number" min="30" step="1"></label>
+              <label><span>代理监听</span><input id="settingProxyHost"></label>
+              <label><span>HTTP 端口</span><input id="settingHttpPort" type="number"></label>
+              <label><span>SOCKS 端口</span><input id="settingSocksPort" type="number"></label>
+              <label><span>新 Web 密码</span><input id="settingPassword" type="password" minlength="6"></label>
+              <button class="primary" type="submit">保存设置</button>
+            </form>
+          </article>
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>说明</h3>
+                <p class="muted">用于部署后核对状态</p>
+              </div>
+            </div>
+            <div class="summary-stack">
+              <div>
+                <span>核心监听</span>
+                <strong id="coreListenInfo">--</strong>
+              </div>
+              <div>
+                <span>分组同步</span>
+                <strong>节点 group 字段自动生成</strong>
+              </div>
+              <div>
+                <span>测速策略</span>
+                <strong>失败自动禁用，恢复自动启用</strong>
+              </div>
+            </div>
+          </article>
         </section>
-
-        <section class="panel">
-          <h2>新增节点</h2>
-          <form id="nodeForm" class="stack compact">
-            <select id="nodeType">
-              <option value="socks">SOCKS</option>
-              <option value="http">HTTP</option>
-              <option value="shadowsocks">Shadowsocks</option>
-              <option value="vless">VLESS</option>
-              <option value="vmess">VMess</option>
-              <option value="trojan">Trojan</option>
-            </select>
-            <input id="nodeName" placeholder="名称">
-            <input id="nodeGroup" placeholder="分组">
-            <input id="nodeServer" placeholder="服务器">
-            <input id="nodePort" placeholder="端口" inputmode="numeric">
-            <input id="nodeUuid" placeholder="UUID">
-            <input id="nodePassword" placeholder="密码">
-            <input id="nodeMethod" placeholder="加密方法">
-            <input id="nodeSecurity" placeholder="security，例如 tls">
-            <input id="nodeSni" placeholder="SNI">
-            <button type="submit">保存节点</button>
-          </form>
-        </section>
-
-        <section class="panel">
-          <h2>设置</h2>
-          <form id="settingsForm" class="stack compact">
-            <label><span>sing-box 路径</span><input id="settingSingBox"></label>
-            <label><span>测速地址</span><input id="settingTestUrl"></label>
-            <label><span>测速间隔秒</span><input id="settingInterval" inputmode="numeric"></label>
-            <label><span>代理监听</span><input id="settingProxyHost"></label>
-            <label><span>HTTP 端口</span><input id="settingHttpPort" inputmode="numeric"></label>
-            <label><span>SOCKS 端口</span><input id="settingSocksPort" inputmode="numeric"></label>
-            <label><span>新 Web 密码</span><input id="settingPassword" type="password" minlength="6"></label>
-            <button type="submit">保存设置</button>
-          </form>
-        </section>
-      </aside>
-    </section>
-
-    <section class="panel logs-panel">
-      <div class="panel-head">
-        <h2>日志</h2>
-        <span id="testingFlag" class="muted"></span>
-      </div>
-      <pre id="logs"></pre>
+      </section>
     </section>
   </main>
 

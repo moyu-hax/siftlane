@@ -1,5 +1,11 @@
 const $ = (selector) => document.querySelector(selector);
-const state = { data: null, setupRequired: false };
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+const state = {
+  data: null,
+  setupRequired: false,
+  view: 'dashboard'
+};
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -21,21 +27,6 @@ function toast(message) {
   toast.timer = setTimeout(() => el.classList.add('hidden'), 2800);
 }
 
-function formatTime(value) {
-  if (!value) return '--';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '--';
-  return date.toLocaleString('zh-CN', { hour12: false });
-}
-
-function nodeBadge(node) {
-  if (node.enabled === false) return '<span class="pill warn">手动禁用</span>';
-  if (node.autoDisabled) return '<span class="pill bad">已禁用</span>';
-  if (node.status === 'up') return '<span class="pill good">可用</span>';
-  if (node.status === 'down') return '<span class="pill bad">失败</span>';
-  return '<span class="pill">未测速</span>';
-}
-
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;',
@@ -44,6 +35,56 @@ function escapeHtml(value) {
     '"': '&quot;',
     "'": '&#39;'
   }[char]));
+}
+
+function formatTime(value) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function formatDuration(seconds) {
+  const total = Number(seconds || 0);
+  if (!Number.isFinite(total) || total <= 0) return '--';
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const secs = Math.floor(total % 60);
+  if (days) return `${days}天 ${hours}小时`;
+  if (hours) return `${hours}小时 ${minutes}分`;
+  if (minutes) return `${minutes}分 ${secs}秒`;
+  return `${secs}秒`;
+}
+
+function statusText(status) {
+  return {
+    running: '运行中',
+    stopped: '已停止',
+    starting: '启动中',
+    error: '异常'
+  }[status] || status || '--';
+}
+
+function usableNode(node) {
+  return Boolean(node && node.enabled !== false && !node.autoDisabled);
+}
+
+function getNodeById(id) {
+  return state.data?.nodes.find((node) => node.id === id) || null;
+}
+
+function groupNodes(group) {
+  const ids = new Set(group?.nodeIds || []);
+  return (state.data?.nodes || []).filter((node) => ids.has(node.id));
+}
+
+function nodeBadge(node) {
+  if (node.enabled === false) return '<span class="pill warn">手动禁用</span>';
+  if (node.autoDisabled) return '<span class="pill bad">已禁用</span>';
+  if (node.status === 'up') return '<span class="pill good">可用</span>';
+  if (node.status === 'down') return '<span class="pill bad">失败</span>';
+  return '<span class="pill">未测速</span>';
 }
 
 async function checkSession() {
@@ -66,34 +107,109 @@ async function loadState() {
   render();
 }
 
+function setView(view) {
+  state.view = view;
+  const titles = {
+    dashboard: '仪表盘',
+    groups: '节点组',
+    settings: '设置'
+  };
+  $('#pageTitle').textContent = titles[view] || '仪表盘';
+  $$('.nav-item').forEach((button) => button.classList.toggle('active', button.dataset.nav === view));
+  $$('.view').forEach((panel) => panel.classList.toggle('hidden', panel.id !== `view-${view}`));
+}
+
+function setSwitchModeUi(mode) {
+  const activeMode = mode === 'auto' ? 'auto' : 'manual';
+  $('#modeManualBtn').classList.toggle('active', activeMode === 'manual');
+  $('#modeAutoBtn').classList.toggle('active', activeMode === 'auto');
+  $('#manualModePanel').classList.toggle('hidden', activeMode !== 'manual');
+  $('#autoModePanel').classList.toggle('hidden', activeMode !== 'auto');
+}
+
+function selectedSwitchMode() {
+  return $('#modeAutoBtn').classList.contains('active') ? 'auto' : 'manual';
+}
+
 function render() {
   const data = state.data;
   if (!data) return;
-  const healthy = data.nodes.filter((node) => node.enabled !== false && !node.autoDisabled).length;
-  const activeGroup = data.groups.find((group) => group.id === data.settings.activeGroupId);
-  $('#coreStatus').textContent = data.core.status;
-  $('#healthyCount').textContent = `${healthy}/${data.nodes.length}`;
-  $('#activeGroupName').textContent = activeGroup?.name || '--';
-  $('#lastTestAt').textContent = formatTime(data.settings.lastTestAt);
-  $('#nodeCount').textContent = `${data.nodes.length} 个节点`;
-  $('#testingFlag').textContent = data.testing ? '测速中' : '';
-  $('#logs').textContent = (data.core.logs || []).map((item) => `[${formatTime(item.at)}] ${item.line}`).join('\n');
+  setView(state.view);
+  renderDashboard(data);
   renderGroups(data);
   renderNodes(data);
   renderSettings(data);
 }
 
+function renderDashboard(data) {
+  const healthy = data.nodes.filter(usableNode).length;
+  const current = data.dashboard?.currentNode || null;
+  $('#coreStatus').textContent = statusText(data.core.status);
+  $('#uptimeText').textContent = formatDuration(data.dashboard?.uptimeSec || 0);
+  $('#healthyCount').textContent = `${healthy}/${data.nodes.length}`;
+  $('#lastTestAt').textContent = formatTime(data.settings.lastTestAt);
+  $('#testingFlag').textContent = data.testing ? '测速中' : '';
+  $('#currentOutboundName').textContent = current?.name || '--';
+  $('#currentOutboundGroup').textContent = current?.group || '--';
+  $('#nextSwitchAt').textContent = formatTime(data.dashboard?.nextSwitchAt);
+  $('#logs').textContent = (data.core.logs || []).map((item) => `[${formatTime(item.at)}] ${item.line}`).join('\n');
+
+  setSwitchModeUi(data.settings.switchMode);
+  renderManualNodeSelect(data);
+  renderAutoGroupSelect(data);
+  $('#autoIntervalInput').value = data.settings.autoSwitchIntervalMin || 10;
+}
+
+function renderManualNodeSelect(data) {
+  const select = $('#manualNodeSelect');
+  const selectedId = data.settings.manualNodeId || data.dashboard?.currentNode?.id || '';
+  const grouped = new Map();
+  for (const node of data.nodes.filter(usableNode)) {
+    const groupName = node.group || '未分组';
+    if (!grouped.has(groupName)) grouped.set(groupName, []);
+    grouped.get(groupName).push(node);
+  }
+
+  let html = '';
+  for (const [groupName, nodes] of grouped.entries()) {
+    html += `<optgroup label="${escapeHtml(groupName)}">`;
+    html += nodes.map((node) => `<option value="${escapeHtml(node.id)}"${node.id === selectedId ? ' selected' : ''}>${escapeHtml(node.name)}</option>`).join('');
+    html += '</optgroup>';
+  }
+  select.innerHTML = html || '<option value="">暂无可用节点</option>';
+}
+
+function renderAutoGroupSelect(data) {
+  const select = $('#autoGroupSelect');
+  if (!data.groups.length) {
+    select.innerHTML = '<option value="">暂无分组</option>';
+    return;
+  }
+  select.innerHTML = data.groups.map((group) => {
+    const nodes = groupNodes(group);
+    const usable = nodes.filter(usableNode);
+    const disabled = usable.length ? '' : ' disabled';
+    const selected = group.id === data.settings.activeGroupId ? ' selected' : '';
+    return `<option value="${escapeHtml(group.id)}"${selected}${disabled}>${escapeHtml(group.name)} (${usable.length}/${nodes.length})</option>`;
+  }).join('');
+}
+
 function renderGroups(data) {
   const wrap = $('#groupsList');
   if (!data.groups.length) {
-    wrap.innerHTML = '<div class="muted">暂无分组</div>';
+    wrap.innerHTML = '<div class="muted">暂无分组。导入节点时填分组名后会自动同步。</div>';
     return;
   }
+
   wrap.innerHTML = data.groups.map((group) => {
-    const nodes = data.nodes.filter((node) => group.nodeIds.includes(node.id));
-    const usable = nodes.filter((node) => node.enabled !== false && !node.autoDisabled);
-    const selected = data.nodes.find((node) => node.id === group.selectedNodeId);
-    const options = nodes.map((node) => `<option value="${escapeHtml(node.id)}"${node.id === group.selectedNodeId ? ' selected' : ''}>${escapeHtml(node.name)}</option>`).join('');
+    const nodes = groupNodes(group);
+    const usable = nodes.filter(usableNode);
+    const selected = getNodeById(group.selectedNodeId);
+    const options = nodes.map((node) => {
+      const disabled = usableNode(node) ? '' : ' disabled';
+      const label = `${node.name}${usableNode(node) ? '' : '（不可用）'}`;
+      return `<option value="${escapeHtml(node.id)}"${node.id === group.selectedNodeId ? ' selected' : ''}${disabled}>${escapeHtml(label)}</option>`;
+    }).join('');
     return `
       <article class="group-item">
         <div>
@@ -115,6 +231,7 @@ function renderGroups(data) {
 }
 
 function renderNodes(data) {
+  $('#nodeCount').textContent = `${data.nodes.length} 个节点`;
   const body = $('#nodesTable');
   if (!data.nodes.length) {
     body.innerHTML = '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
@@ -151,6 +268,7 @@ function renderSettings(data) {
   $('#settingProxyHost').value = data.settings.proxyListenHost || '';
   $('#settingHttpPort').value = data.settings.httpPort || '';
   $('#settingSocksPort').value = data.settings.socksPort || '';
+  $('#coreListenInfo').textContent = `${data.settings.proxyListenHost}:${data.settings.httpPort} / SOCKS ${data.settings.socksPort}`;
 }
 
 async function runAction(fn, success) {
@@ -191,6 +309,20 @@ $('#stopCoreBtn').addEventListener('click', () => runAction(() => request('/api/
 $('#restartCoreBtn').addEventListener('click', () => runAction(() => request('/api/core/restart', { method: 'POST', body: '{}' }), '核心已重启'));
 $('#testAllBtn').addEventListener('click', () => runAction(() => request('/api/test', { method: 'POST', body: '{}' }), '测速完成'));
 
+$('#dashboardForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const switchMode = selectedSwitchMode();
+  runAction(() => request('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({
+      switchMode,
+      manualNodeId: $('#manualNodeSelect').value || null,
+      activeGroupId: $('#autoGroupSelect').value || undefined,
+      autoSwitchIntervalMin: Number($('#autoIntervalInput').value || 10)
+    })
+  }), '切换设置已保存');
+});
+
 $('#groupForm').addEventListener('submit', (event) => {
   event.preventDefault();
   const name = $('#groupName').value.trim();
@@ -204,9 +336,10 @@ $('#groupForm').addEventListener('submit', (event) => {
 $('#importForm').addEventListener('submit', (event) => {
   event.preventDefault();
   runAction(async () => {
-    const text = $('#importText').value;
-    const group = $('#importGroup').value.trim();
-    const payload = await request('/api/nodes/import', { method: 'POST', body: JSON.stringify({ text, group }) });
+    const payload = await request('/api/nodes/import', {
+      method: 'POST',
+      body: JSON.stringify({ text: $('#importText').value, group: $('#importGroup').value.trim() })
+    });
     $('#importText').value = '';
     toast(`导入 ${payload.importedCount || 0} 个节点`);
   });
@@ -227,7 +360,10 @@ $('#nodeForm').addEventListener('submit', (event) => {
         password: $('#nodePassword').value,
         method: $('#nodeMethod').value,
         security: $('#nodeSecurity').value,
-        sni: $('#nodeSni').value
+        sni: $('#nodeSni').value,
+        fingerprint: $('#nodeFingerprint').value,
+        pbk: $('#nodePbk').value,
+        sid: $('#nodeSid').value
       })
     });
     event.target.reset();
@@ -263,7 +399,19 @@ document.addEventListener('change', (event) => {
 });
 
 document.addEventListener('click', (event) => {
-  const target = event.target;
+  const target = event.target.closest('button');
+  if (!target) return;
+
+  if (target.dataset.nav) {
+    setView(target.dataset.nav);
+    return;
+  }
+
+  if (target.dataset.switchMode) {
+    setSwitchModeUi(target.dataset.switchMode);
+    return;
+  }
+
   const nodeTest = target.dataset.nodeTest;
   const nodeToggle = target.dataset.nodeToggle;
   const nodeDelete = target.dataset.nodeDelete;
@@ -275,16 +423,16 @@ document.addEventListener('click', (event) => {
   if (nodeTest) {
     runAction(() => request('/api/test', { method: 'POST', body: JSON.stringify({ ids: [nodeTest] }) }), '测速完成');
   } else if (nodeToggle) {
-    const node = state.data.nodes.find((item) => item.id === nodeToggle);
+    const node = getNodeById(nodeToggle);
     runAction(() => request(`/api/nodes/${encodeURIComponent(nodeToggle)}`, {
       method: 'PUT',
-      body: JSON.stringify({ enabled: node.enabled === false })
+      body: JSON.stringify({ enabled: node?.enabled === false })
     }), '状态已更新');
   } else if (nodeDelete) {
     if (!confirm('删除这个节点？')) return;
     runAction(() => request(`/api/nodes/${encodeURIComponent(nodeDelete)}`, { method: 'DELETE' }), '节点已删除');
   } else if (nodeGroup) {
-    const node = state.data.nodes.find((item) => item.id === nodeGroup);
+    const node = getNodeById(nodeGroup);
     const group = prompt('分组名称', node?.group || '');
     if (group == null) return;
     runAction(() => request(`/api/nodes/${encodeURIComponent(nodeGroup)}`, {

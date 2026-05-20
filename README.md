@@ -5,6 +5,7 @@ Siftlane is a lightweight Web control panel for grouped proxy nodes. It keeps th
 - Web password login
 - JSON data storage
 - Custom node groups
+- Manual node selection and grouped auto-switching
 - Timed health checks
 - Failed nodes are auto-disabled
 - Recovered nodes are auto-enabled
@@ -55,6 +56,24 @@ curl -fsSL -o install-server.sh https://raw.githubusercontent.com/moyu-hax/siftl
 sudo bash install-server.sh
 ```
 
+The installer opens an interactive menu:
+
+- `1) Install`
+- `2) Update`
+- `3) Uninstall`
+- `4) Status`
+- `5) Logs`
+
+Non-interactive commands are also supported:
+
+```bash
+sudo bash install-server.sh install
+sudo bash install-server.sh update
+sudo bash install-server.sh uninstall
+sudo bash install-server.sh status
+sudo bash install-server.sh logs
+```
+
 By default the installer uses:
 
 ```text
@@ -64,10 +83,10 @@ https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip
 You can override it:
 
 ```bash
-sudo LEME_DOWNLOAD_URL="https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip" bash install-server.sh
+sudo LEME_DOWNLOAD_URL="https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip" bash install-server.sh update
 ```
 
-The installer uses a local binary first when `/root/siftlane/siftlane-linux-x64` or `/root/siftlane/siftlane-linux-arm64` exists. If no local binary exists, it downloads the artifact URL, unzips it, selects the correct binary for the server architecture, installs sing-box if needed, and starts the `siftlane` systemd service.
+The installer uses a local binary first for install when `/root/siftlane/siftlane-linux-x64`, `/root/siftlane/siftlane-linux-arm64`, or `/root/siftlane/siftlane` exists. The update action forces a fresh download from the Release URL. If no local binary exists, it downloads the artifact URL, unzips it, selects the correct binary for the server architecture, installs sing-box if needed, and starts the `siftlane` systemd service.
 
 GitHub Actions artifact page URLs may need a logged-in GitHub session. For servers, prefer the Release URL above. If you must use an Actions artifact URL for a private repository, pass `LEME_GITHUB_TOKEN` with Actions read permission.
 

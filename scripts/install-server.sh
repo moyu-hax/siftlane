@@ -41,7 +41,7 @@ require_systemd() {
 normalize_download_url() {
   local url="$1"
 
-  if [[ "${url}" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/[0-9]+/artifacts/([0-9]+) ]]; then
+  if [[ "${url}" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/[0-9]+/artifacts/([0-9]+)$ ]]; then
     echo "https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/actions/artifacts/${BASH_REMATCH[3]}/zip"
     return
   fi
@@ -58,11 +58,11 @@ download_failed_hint() {
 
   echo "Download failed: ${url}"
   if is_github_artifact_api_url "${url}"; then
-    echo "GitHub Actions artifact downloads may need authentication, especially for private repositories."
+    echo "GitHub Actions artifact downloads may require authentication."
     echo "Use a token with Actions read permission:"
     echo "  sudo LEME_GITHUB_TOKEN=\"YOUR_TOKEN\" LEME_DOWNLOAD_URL=\"YOUR_ARTIFACT_URL\" bash install-server.sh"
-    echo "Recommended for servers: use the Release URL instead:"
-    echo "  https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip"
+    echo "Recommended on servers: use the Release URL instead:"
+    echo "  ${DEFAULT_DOWNLOAD_URL}"
   fi
 }
 
@@ -70,28 +70,30 @@ fetch_file() {
   local url="$1"
   local output="$2"
   local normalized_url
-
   normalized_url="$(normalize_download_url "${url}")"
-  if [[ "${normalized_url}" != "${url}" ]]; then
-    echo "Converted GitHub artifact page URL to API download URL."
-    url="${normalized_url}"
-  fi
+  url="${normalized_url}"
 
   if command -v curl >/dev/null 2>&1; then
-    local curl_args=(-fL --retry 3 --connect-timeout 20 -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
-    if is_github_artifact_api_url "${url}" && [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
-      curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN_VALUE}")
+    local args=(-fL --retry 3 --connect-timeout 20 -o "${output}")
+    if is_github_artifact_api_url "${url}"; then
+      args+=( -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" )
+      if [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
+        args+=( -H "Authorization: Bearer ${GITHUB_TOKEN_VALUE}" )
+      fi
     fi
-    if ! curl "${curl_args[@]}" "${url}" -o "${output}"; then
+    if ! curl "${args[@]}" "${url}"; then
       download_failed_hint "${url}"
       exit 1
     fi
   elif command -v wget >/dev/null 2>&1; then
-    local wget_args=(-O "${output}" --header="Accept: application/vnd.github+json" --header="X-GitHub-Api-Version: 2022-11-28")
-    if is_github_artifact_api_url "${url}" && [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
-      wget_args+=(--header="Authorization: Bearer ${GITHUB_TOKEN_VALUE}")
+    local args=(-O "${output}")
+    if is_github_artifact_api_url "${url}"; then
+      args+=( --header="Accept: application/vnd.github+json" --header="X-GitHub-Api-Version: 2022-11-28" )
+      if [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
+        args+=( --header="Authorization: Bearer ${GITHUB_TOKEN_VALUE}" )
+      fi
     fi
-    if ! wget "${wget_args[@]}" "${url}"; then
+    if ! wget "${args[@]}" "${url}"; then
       download_failed_hint "${url}"
       exit 1
     fi
@@ -100,6 +102,7 @@ fetch_file() {
     exit 1
   fi
 }
+
 file_magic() {
   dd if="$1" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
 }
@@ -161,7 +164,6 @@ find_binary_in_dir() {
   for candidate in \
     "${dir}/siftlane-linux-${ARCH_SUFFIX}" \
     "${dir}/release/siftlane-linux-${ARCH_SUFFIX}" \
-    "${dir}/siftlane-linux/siftlane-linux-${ARCH_SUFFIX}" \
     "${dir}/siftlane"; do
     if [[ -f "${candidate}" ]]; then
       echo "${candidate}"
@@ -194,17 +196,12 @@ find_local_binary() {
     "${LEME_BINARY:-}" \
     "${SIFTLANE_BINARY:-}" \
     "${ROOT_DIR}/siftlane-linux-${ARCH_SUFFIX}" \
-    "${ROOT_DIR}/upload/siftlane-linux-${ARCH_SUFFIX}"; do
+    "${ROOT_DIR}/siftlane"; do
     if [[ -n "${candidate}" && -f "${candidate}" ]]; then
       echo "${candidate}"
       return 0
     fi
   done
-
-  if [[ -z "${DOWNLOAD_URL}" && -f "${BINARY_PATH}" ]]; then
-    echo "${BINARY_PATH}"
-    return 0
-  fi
 
   return 1
 }
@@ -232,18 +229,12 @@ find_local_archive() {
 
 install_binary_file() {
   local source="$1"
-
   if ! is_elf "${source}"; then
     echo "The selected file is not a Linux executable: ${source}"
-    echo "If this is a GitHub Actions artifact, pass its download URL so the script can download and unzip it."
     exit 1
   fi
 
-  if [[ "${source}" == "${BINARY_PATH}" ]]; then
-    chmod +x "${BINARY_PATH}"
-  else
-    install -Dm755 "${source}" "${BINARY_PATH}"
-  fi
+  install -Dm755 "${source}" "${BINARY_PATH}"
 }
 
 install_archive_file() {
@@ -268,25 +259,16 @@ install_archive_file() {
 download_and_install() {
   local download_file="${DOWNLOAD_DIR}/siftlane-download"
 
-  if [[ -z "${DOWNLOAD_URL}" ]]; then
-    echo "No local binary found."
-    echo "Put siftlane-linux-${ARCH_SUFFIX} in ${ROOT_DIR}, or run with:"
-    echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip\" bash install-server.sh"
-    exit 1
-  fi
-
   mkdir -p "${DOWNLOAD_DIR}"
   rm -f "${download_file}"
-
   echo "Downloading artifact from: ${DOWNLOAD_URL}"
   fetch_file "${DOWNLOAD_URL}" "${download_file}"
 
   if is_zip "${download_file}"; then
     install_archive_file "${download_file}"
-    return
+  else
+    install_binary_file "${download_file}"
   fi
-
-  install_binary_file "${download_file}"
 }
 
 write_env() {
@@ -324,8 +306,13 @@ EOF
 }
 
 install_or_update() {
+  local force_download="${1:-0}"
   local local_binary
   local local_archive
+
+  if [[ "${force_download}" == "1" ]]; then
+    FORCE_DOWNLOAD=1
+  fi
 
   mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DOWNLOAD_DIR}"
 
@@ -370,7 +357,15 @@ install_or_update() {
   echo "Commands:"
   echo "  systemctl status ${SERVICE_NAME}"
   echo "  systemctl restart ${SERVICE_NAME}"
-  echo "  journalctl -u ${SERVICE_NAME} -f"
+  echo "  journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
+}
+
+show_status() {
+  systemctl status "${SERVICE_NAME}" --no-pager || true
+}
+
+show_logs() {
+  journalctl -u "${SERVICE_NAME}" -n 100 --no-pager || true
 }
 
 uninstall() {
@@ -385,27 +380,44 @@ uninstall() {
 }
 
 usage() {
-  echo "Usage: bash install-server.sh [install|update|uninstall]"
+  echo "Usage: bash install-server.sh [install|update|uninstall|status|logs]"
+}
+
+menu() {
+  echo "Siftlane installer"
+  echo "Root: ${ROOT_DIR}"
+  echo "Architecture: ${ARCH_RAW} -> ${ARCH_SUFFIX}"
   echo
-  echo "Release download example:"
-  echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip\" bash install-server.sh"
-  echo
-  echo "GitHub Actions artifact example, private repositories need LEME_GITHUB_TOKEN:"
-  echo "  sudo LEME_GITHUB_TOKEN=\"YOUR_TOKEN\" LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/actions/runs/.../artifacts/...\" bash install-server.sh"
+  echo "1) Install"
+  echo "2) Update"
+  echo "3) Uninstall"
+  echo "4) Status"
+  echo "5) Logs"
+  echo "0) Exit"
+  read -r -p "Choose [1]: " choice
+  case "${choice:-1}" in
+    1) install_or_update 0 ;;
+    2) install_or_update 1 ;;
+    3) uninstall ;;
+    4) show_status ;;
+    5) show_logs ;;
+    0) exit 0 ;;
+    *) echo "Invalid choice"; exit 1 ;;
+  esac
 }
 
 main() {
   require_root
   require_systemd
 
-  echo "Siftlane installer"
-  echo "Root: ${ROOT_DIR}"
-  echo "Architecture: ${ARCH_RAW} -> ${ARCH_SUFFIX}"
-
-  case "${1:-install}" in
-    install|update) install_or_update ;;
+  case "${1:-menu}" in
+    install) install_or_update 0 ;;
+    update) install_or_update 1 ;;
     uninstall|remove) uninstall ;;
+    status) show_status ;;
+    logs) show_logs ;;
     -h|--help|help) usage ;;
+    menu|'') menu ;;
     *) usage; exit 1 ;;
   esac
 }
