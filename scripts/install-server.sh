@@ -12,8 +12,10 @@ ENV_FILE="/etc/default/${SERVICE_NAME}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 HOST="${SIFTLANE_HOST:-0.0.0.0}"
 PORT="${SIFTLANE_PORT:-51888}"
-DOWNLOAD_URL="${LEME_DOWNLOAD_URL:-${SIFTLANE_DOWNLOAD_URL:-}}"
+DEFAULT_DOWNLOAD_URL="https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip"
+DOWNLOAD_URL="${LEME_DOWNLOAD_URL:-${SIFTLANE_DOWNLOAD_URL:-${DEFAULT_DOWNLOAD_URL}}}"
 FORCE_DOWNLOAD="${LEME_FORCE_DOWNLOAD:-${SIFTLANE_FORCE_DOWNLOAD:-0}}"
+GITHUB_TOKEN_VALUE="${LEME_GITHUB_TOKEN:-${SIFTLANE_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}}"
 
 ARCH_RAW="$(uname -m)"
 case "${ARCH_RAW}" in
@@ -36,20 +38,68 @@ require_systemd() {
   fi
 }
 
+normalize_download_url() {
+  local url="$1"
+
+  if [[ "${url}" =~ ^https://github\.com/([^/]+)/([^/]+)/actions/runs/[0-9]+/artifacts/([0-9]+) ]]; then
+    echo "https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/actions/artifacts/${BASH_REMATCH[3]}/zip"
+    return
+  fi
+
+  echo "${url}"
+}
+
+is_github_artifact_api_url() {
+  [[ "$1" =~ ^https://api\.github\.com/repos/[^/]+/[^/]+/actions/artifacts/[0-9]+/zip$ ]]
+}
+
+download_failed_hint() {
+  local url="$1"
+
+  echo "Download failed: ${url}"
+  if is_github_artifact_api_url "${url}"; then
+    echo "GitHub Actions artifact downloads may need authentication, especially for private repositories."
+    echo "Use a token with Actions read permission:"
+    echo "  sudo LEME_GITHUB_TOKEN=\"YOUR_TOKEN\" LEME_DOWNLOAD_URL=\"YOUR_ARTIFACT_URL\" bash install-server.sh"
+    echo "Recommended for servers: use the Release URL instead:"
+    echo "  https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip"
+  fi
+}
+
 fetch_file() {
   local url="$1"
   local output="$2"
+  local normalized_url
+
+  normalized_url="$(normalize_download_url "${url}")"
+  if [[ "${normalized_url}" != "${url}" ]]; then
+    echo "Converted GitHub artifact page URL to API download URL."
+    url="${normalized_url}"
+  fi
 
   if command -v curl >/dev/null 2>&1; then
-    curl -fL --retry 3 --connect-timeout 20 "${url}" -o "${output}"
+    local curl_args=(-fL --retry 3 --connect-timeout 20 -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")
+    if is_github_artifact_api_url "${url}" && [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
+      curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN_VALUE}")
+    fi
+    if ! curl "${curl_args[@]}" "${url}" -o "${output}"; then
+      download_failed_hint "${url}"
+      exit 1
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -O "${output}" "${url}"
+    local wget_args=(-O "${output}" --header="Accept: application/vnd.github+json" --header="X-GitHub-Api-Version: 2022-11-28")
+    if is_github_artifact_api_url "${url}" && [[ -n "${GITHUB_TOKEN_VALUE}" ]]; then
+      wget_args+=(--header="Authorization: Bearer ${GITHUB_TOKEN_VALUE}")
+    fi
+    if ! wget "${wget_args[@]}" "${url}"; then
+      download_failed_hint "${url}"
+      exit 1
+    fi
   else
     echo "curl or wget is required."
     exit 1
   fi
 }
-
 file_magic() {
   dd if="$1" bs=4 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n'
 }
@@ -221,7 +271,7 @@ download_and_install() {
   if [[ -z "${DOWNLOAD_URL}" ]]; then
     echo "No local binary found."
     echo "Put siftlane-linux-${ARCH_SUFFIX} in ${ROOT_DIR}, or run with:"
-    echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/.../artifacts/...\" bash install-server.sh"
+    echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip\" bash install-server.sh"
     exit 1
   fi
 
@@ -337,8 +387,11 @@ uninstall() {
 usage() {
   echo "Usage: bash install-server.sh [install|update|uninstall]"
   echo
-  echo "Download artifact example:"
-  echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/actions/runs/.../artifacts/...\" bash install-server.sh"
+  echo "Release download example:"
+  echo "  sudo LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/releases/latest/download/siftlane-linux.zip\" bash install-server.sh"
+  echo
+  echo "GitHub Actions artifact example, private repositories need LEME_GITHUB_TOKEN:"
+  echo "  sudo LEME_GITHUB_TOKEN=\"YOUR_TOKEN\" LEME_DOWNLOAD_URL=\"https://github.com/moyu-hax/siftlane/actions/runs/.../artifacts/...\" bash install-server.sh"
 }
 
 main() {

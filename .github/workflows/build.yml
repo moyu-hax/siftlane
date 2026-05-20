@@ -5,6 +5,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
@@ -32,6 +35,7 @@ jobs:
           cp dist/siftlane-linux-x64 release/siftlane-linux-x64
           cp dist/siftlane-linux-arm64 release/siftlane-linux-arm64
           chmod +x release/siftlane-linux-*
+          (cd release && zip -q siftlane-linux.zip siftlane-linux-x64 siftlane-linux-arm64)
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -40,4 +44,13 @@ jobs:
           path: |
             release/siftlane-linux-x64
             release/siftlane-linux-arm64
+            release/siftlane-linux.zip
           if-no-files-found: error
+
+      - name: Publish latest release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "Siftlane Latest" --notes "Latest Siftlane Linux build"
+          gh release upload latest release/siftlane-linux.zip release/siftlane-linux-x64 release/siftlane-linux-arm64 --clobber
