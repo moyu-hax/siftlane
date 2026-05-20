@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Siftlane</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/png" href="/favicon.png">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -171,6 +173,13 @@
                 <button type="submit">新增</button>
               </form>
             </div>
+            <form id="groupTestIntervalForm" class="interval-form">
+              <label>
+                <span>自动测速间隔（分钟）</span>
+                <input id="groupTestIntervalMin" type="number" min="1" max="1440" inputmode="numeric">
+              </label>
+              <button type="submit">保存间隔</button>
+            </form>
             <div id="groupsList" class="group-list"></div>
           </article>
 
@@ -224,10 +233,18 @@
               <p class="muted" id="nodeCount">0 个节点</p>
             </div>
           </div>
+          <div class="bulk-toolbar">
+            <span id="selectedNodeCount" class="muted">已选 0 个</span>
+            <button id="batchGroupBtn" type="button">批量分组</button>
+            <button id="batchDisableBtn" type="button">批量禁用</button>
+            <button id="batchTestBtn" type="button">批量测速</button>
+            <button id="batchDeleteBtn" type="button">批量删除</button>
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
+                  <th class="check-cell"><input id="selectAllNodes" type="checkbox" aria-label="全选节点"></th>
                   <th>名称</th>
                   <th>分组</th>
                   <th>地址</th>

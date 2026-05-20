@@ -291,6 +291,22 @@ label span {
   min-width: min(360px, 100%);
 }
 
+.interval-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.interval-form label {
+  margin: 0;
+}
+
 .segmented {
   width: fit-content;
   margin-top: 14px;
@@ -378,6 +394,39 @@ label span {
 .group-actions select {
   min-width: 180px;
   width: auto;
+}
+
+.bulk-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: .52;
+}
+
+.check-cell {
+  width: 42px;
+  text-align: center;
+}
+
+.node-check,
+#selectAllNodes {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.selected-row td {
+  background: #f0f7ff;
 }
 
 .table-wrap {
@@ -507,13 +556,18 @@ pre {
   }
 
   .inline-form,
-  .segmented {
+  .segmented,
+  .interval-form {
     width: 100%;
     min-width: 0;
   }
 
   .segment {
     flex: 1;
+  }
+
+  .interval-form {
+    grid-template-columns: 1fr;
   }
 
   .group-actions {

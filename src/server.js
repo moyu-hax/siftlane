@@ -47,6 +47,10 @@ function normalizeString(value) {
   return String(value || '').trim();
 }
 
+function stripAnsi(value) {
+  return String(value || '').replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 function defaultState() {
   return {
     version: 1,
@@ -328,7 +332,7 @@ async function runAutoSwitchIfDue() {
   state.settings.lastSwitchAt = new Date().toISOString();
   saveState();
   const after = runtimeSignature();
-  if (selected) appendCoreLog(`auto switched to ${selected.name}`);
+  if (selected) appendCoreLog(`自动切换到节点：${selected.name}`);
   if (selected && before !== after) {
     await restartCore();
   }
@@ -417,7 +421,7 @@ function readJsonBody(req) {
       try {
         resolve(JSON.parse(raw));
       } catch {
-        reject(new Error('Invalid JSON body'));
+        reject(new Error('JSON 请求体无效'));
       }
     });
     req.on('error', reject);
@@ -459,8 +463,8 @@ function publicState() {
 }
 
 function appendCoreLog(line) {
-  const text = String(line || '').trim();
-  if (!text) return;
+  const text = stripAnsi(line).trim();
+  if (!text || /read http request: EOF/i.test(text)) return;
   core.logs.push({ at: new Date().toISOString(), line: text });
   if (core.logs.length > MAX_LOG_LINES) {
     core.logs.splice(0, core.logs.length - MAX_LOG_LINES);
@@ -620,7 +624,7 @@ function waitForPort(port, host = '127.0.0.1', timeoutMs = 5000) {
       socket.once('error', () => {
         socket.destroy();
         if (Date.now() - started >= timeoutMs) {
-          reject(new Error(`Timed out waiting for ${host}:${port}`));
+          reject(new Error(`等待 ${host}:${port} 启动超时`));
           return;
         }
         setTimeout(attempt, 120);
@@ -678,7 +682,7 @@ async function startCore() {
     if (core.process === child) core.process = null;
     core.status = code === 0 || signal === 'SIGTERM' ? 'stopped' : 'error';
     core.startedAt = null;
-    if (core.status === 'error') core.lastError = `sing-box exited with code ${code ?? signal}`;
+    if (core.status === 'error') core.lastError = `sing-box 异常退出：${code ?? signal}`;
   });
   await waitForPort(state.settings.httpPort);
   core.status = 'running';
@@ -738,7 +742,7 @@ function probeHttpProxy(port, target) {
       res.resume();
       resolve(res.statusCode || 0);
     });
-    req.once('timeout', () => req.destroy(new Error('timeout')));
+    req.once('timeout', () => req.destroy(new Error('请求超时')));
     req.once('error', reject);
     req.end();
   });
@@ -778,7 +782,7 @@ function probeHttpsProxy(port, target) {
       secure.once('error', reject);
       secure.setTimeout(TEST_TIMEOUT_MS, () => secure.destroy(new Error('timeout')));
     });
-    req.once('timeout', () => req.destroy(new Error('timeout')));
+    req.once('timeout', () => req.destroy(new Error('请求超时')));
     req.once('error', reject);
     req.end();
   });
@@ -819,8 +823,13 @@ async function measureNode(node) {
     const latencyMs = await probeProxy(port, state.settings.testUrl);
     return { id: node.id, ok: true, latencyMs };
   } catch (error) {
-    const detail = stderr.join('\n').split(/\r?\n/).filter(Boolean).slice(-2).join(' | ');
-    return { id: node.id, ok: false, error: detail || error.message || 'test failed' };
+    const detail = stderr.join('\n')
+      .split(/\r?\n/)
+      .map((line) => stripAnsi(line).trim())
+      .filter((line) => line && !/read http request: EOF/i.test(line))
+      .slice(-2)
+      .join(' | ');
+    return { id: node.id, ok: false, error: detail || error.message || '测试失败' };
   } finally {
     await stopProcess(child, 1500);
     try {
@@ -869,7 +878,7 @@ async function testNodes(nodeIds = []) {
         node.status = 'down';
         node.autoDisabled = true;
         node.latencyMs = null;
-        node.error = result.error || 'test failed';
+        node.error = result.error || '测速失败';
       }
     }
     state.settings.lastTestAt = now;
@@ -892,7 +901,7 @@ async function runAutoTestIfDue() {
   try {
     await testNodes([]);
   } catch (error) {
-    appendCoreLog(`auto test failed: ${error.message}`);
+    appendCoreLog(`自动测速失败：${error.message}`);
   }
 }
 
@@ -1063,9 +1072,9 @@ function parseShadowsocksLink(line, groupName = '') {
 
 function updateNode(id, patch) {
   const index = state.nodes.findIndex((node) => node.id === id);
-  if (index < 0) throw new Error('Node not found');
+  if (index < 0) throw new Error('节点未找到');
   const next = normalizeNode({ ...state.nodes[index], ...patch, id });
-  if (!next) throw new Error('Invalid node');
+  if (!next) throw new Error('节点无效');
   state.nodes[index] = next;
   syncGroups(state);
   saveState();
@@ -1086,11 +1095,11 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/setup' && req.method === 'POST') {
     if (state.settings.passwordHash) {
-      sendJson(res, 400, { ok: false, error: 'Password already configured' });
+      sendJson(res, 400, { ok: false, error: 'Web 密码已经设置' });
       return;
     }
     const body = await readJsonBody(req);
-    if (!body.password || String(body.password).length < 6) throw new Error('Password must be at least 6 characters');
+    if (!body.password || String(body.password).length < 6) throw new Error('密码至少需要 6 位');
     state.settings.passwordHash = hashPassword(body.password);
     saveState();
     createSession(res);
@@ -1101,7 +1110,7 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/login' && req.method === 'POST') {
     const body = await readJsonBody(req);
     if (!state.settings.passwordHash || !verifyPassword(body.password || '', state.settings.passwordHash)) {
-      sendJson(res, 401, { ok: false, error: 'Invalid password' });
+      sendJson(res, 401, { ok: false, error: '密码错误' });
       return;
     }
     createSession(res);
@@ -1110,7 +1119,7 @@ async function handleApi(req, res, pathname) {
   }
 
   if (!isAuthenticated(req)) {
-    sendJson(res, 401, { ok: false, error: 'Unauthorized' });
+    sendJson(res, 401, { ok: false, error: '未授权' });
     return;
   }
 
@@ -1145,7 +1154,7 @@ async function handleApi(req, res, pathname) {
       state.settings.lastSwitchAt = new Date().toISOString();
     }
     if (body.password) {
-      if (String(body.password).length < 6) throw new Error('Password must be at least 6 characters');
+      if (String(body.password).length < 6) throw new Error('密码至少需要 6 位');
       state.settings.passwordHash = hashPassword(body.password);
     }
     saveState();
@@ -1167,7 +1176,7 @@ async function handleApi(req, res, pathname) {
   if (pathname === '/api/nodes' && req.method === 'POST') {
     const body = await readJsonBody(req);
     const node = normalizeNode({ ...body, id: createId('node_') });
-    if (!node) throw new Error('Invalid node');
+    if (!node) throw new Error('节点无效');
     state.nodes.push(node);
     syncGroups(state);
     saveState();
@@ -1203,7 +1212,7 @@ async function handleApi(req, res, pathname) {
   if (groupMatch && req.method === 'PUT') {
     const body = await readJsonBody(req);
     const group = state.groups.find((item) => item.id === groupMatch[1]);
-    if (!group) throw new Error('Group not found');
+    if (!group) throw new Error('分组未找到');
     if (body.name) group.name = normalizeString(body.name);
     if (Array.isArray(body.nodeIds)) group.nodeIds = [...new Set(body.nodeIds.map(normalizeString).filter(Boolean))];
     if (body.selectedNodeId !== undefined) group.selectedNodeId = normalizeString(body.selectedNodeId) || null;
@@ -1259,7 +1268,7 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
-  sendJson(res, 404, { ok: false, error: 'Not found' });
+  sendJson(res, 404, { ok: false, error: '未找到' });
 }
 
 function contentType(filePath) {
@@ -1294,7 +1303,7 @@ const server = http.createServer(async (req, res) => {
     }
     serveStatic(req, res, url.pathname);
   } catch (error) {
-    sendJson(res, error.status || 500, { ok: false, error: error.message || 'Internal error' });
+    sendJson(res, error.status || 500, { ok: false, error: error.message || '内部错误' });
   }
 });
 
@@ -1314,6 +1323,6 @@ process.once('SIGTERM', async () => {
 
 server.listen(state.settings.webPort, state.settings.webHost, () => {
   const shownHost = state.settings.webHost === '0.0.0.0' ? '127.0.0.1' : state.settings.webHost;
-  console.log(`Siftlane listening on http://${shownHost}:${state.settings.webPort}`);
-  console.log(`Data directory: ${DATA_DIR}`);
+  console.log(`Siftlane 正在监听：http://${shownHost}:${state.settings.webPort}`);
+  console.log(`数据目录：${DATA_DIR}`);
 });

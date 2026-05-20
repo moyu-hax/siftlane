@@ -4,7 +4,8 @@ const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 const state = {
   data: null,
   setupRequired: false,
-  view: 'dashboard'
+  view: 'dashboard',
+  selectedNodeIds: new Set()
 };
 
 async function request(path, options = {}) {
@@ -79,6 +80,37 @@ function groupNodes(group) {
   return (state.data?.nodes || []).filter((node) => ids.has(node.id));
 }
 
+function pruneSelectedNodes(data) {
+  const validIds = new Set((data?.nodes || []).map((node) => node.id));
+  for (const id of Array.from(state.selectedNodeIds)) {
+    if (!validIds.has(id)) state.selectedNodeIds.delete(id);
+  }
+}
+
+function selectedNodeIds() {
+  pruneSelectedNodes(state.data);
+  return Array.from(state.selectedNodeIds);
+}
+
+function updateBulkSelectionUi(data = state.data) {
+  const nodes = data?.nodes || [];
+  const selected = selectedNodeIds();
+  const count = selected.length;
+  const countEl = $('#selectedNodeCount');
+  if (countEl) countEl.textContent = `已选 ${count} 个`;
+
+  const selectAll = $('#selectAllNodes');
+  if (selectAll) {
+    selectAll.checked = nodes.length > 0 && count === nodes.length;
+    selectAll.indeterminate = count > 0 && count < nodes.length;
+  }
+
+  ['#batchGroupBtn', '#batchDisableBtn', '#batchTestBtn', '#batchDeleteBtn'].forEach((selector) => {
+    const button = $(selector);
+    if (button) button.disabled = count === 0;
+  });
+}
+
 function nodeBadge(node) {
   if (node.enabled === false) return '<span class="pill warn">手动禁用</span>';
   if (node.autoDisabled) return '<span class="pill bad">已禁用</span>';
@@ -137,6 +169,7 @@ function render() {
   setView(state.view);
   renderDashboard(data);
   renderGroups(data);
+  renderGroupSettings(data);
   renderNodes(data);
   renderSettings(data);
 }
@@ -230,15 +263,25 @@ function renderGroups(data) {
   }).join('');
 }
 
+function renderGroupSettings(data) {
+  const input = $('#groupTestIntervalMin');
+  if (input) {
+    input.value = Math.max(1, Math.round((data.settings.testIntervalSec || 300) / 60));
+  }
+}
+
 function renderNodes(data) {
   $('#nodeCount').textContent = `${data.nodes.length} 个节点`;
   const body = $('#nodesTable');
+  pruneSelectedNodes(data);
   if (!data.nodes.length) {
-    body.innerHTML = '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
+    body.innerHTML = '<tr><td colspan="7" class="muted">暂无节点</td></tr>';
+    updateBulkSelectionUi(data);
     return;
   }
   body.innerHTML = data.nodes.map((node) => `
-    <tr>
+    <tr class="${state.selectedNodeIds.has(node.id) ? 'selected-row' : ''}">
+      <td class="check-cell"><input class="node-check" type="checkbox" data-node-select="${escapeHtml(node.id)}"${state.selectedNodeIds.has(node.id) ? ' checked' : ''}></td>
       <td>
         <div class="node-name">${escapeHtml(node.name)}</div>
         <div class="node-meta">${escapeHtml(node.type.toUpperCase())}</div>
@@ -259,6 +302,7 @@ function renderNodes(data) {
         </div>
       </td>
     </tr>`).join('');
+  updateBulkSelectionUi(data);
 }
 
 function renderSettings(data) {
@@ -279,6 +323,28 @@ async function runAction(fn, success) {
   } catch (error) {
     toast(error.message);
   }
+}
+
+function getSelectedNodeIdsOrToast() {
+  const ids = selectedNodeIds();
+  if (!ids.length) toast('请先勾选节点');
+  return ids;
+}
+
+async function updateSelectedNodes(ids, patch) {
+  for (const id of ids) {
+    await request(`/api/nodes/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(typeof patch === 'function' ? patch(id) : patch)
+    });
+  }
+}
+
+async function deleteSelectedNodes(ids) {
+  for (const id of ids) {
+    await request(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+  state.selectedNodeIds.clear();
 }
 
 $('#authForm').addEventListener('submit', async (event) => {
@@ -309,6 +375,32 @@ $('#stopCoreBtn').addEventListener('click', () => runAction(() => request('/api/
 $('#restartCoreBtn').addEventListener('click', () => runAction(() => request('/api/core/restart', { method: 'POST', body: '{}' }), '核心已重启'));
 $('#testAllBtn').addEventListener('click', () => runAction(() => request('/api/test', { method: 'POST', body: '{}' }), '测速完成'));
 
+$('#batchGroupBtn').addEventListener('click', () => {
+  const ids = getSelectedNodeIdsOrToast();
+  if (!ids.length) return;
+  const group = prompt('批量分组名称', '');
+  if (group == null) return;
+  runAction(() => updateSelectedNodes(ids, { group }), '批量分组已完成');
+});
+
+$('#batchDisableBtn').addEventListener('click', () => {
+  const ids = getSelectedNodeIdsOrToast();
+  if (!ids.length) return;
+  runAction(() => updateSelectedNodes(ids, { enabled: false }), '已批量禁用');
+});
+
+$('#batchTestBtn').addEventListener('click', () => {
+  const ids = getSelectedNodeIdsOrToast();
+  if (!ids.length) return;
+  runAction(() => request('/api/test', { method: 'POST', body: JSON.stringify({ ids }) }), '批量测速完成');
+});
+
+$('#batchDeleteBtn').addEventListener('click', () => {
+  const ids = getSelectedNodeIdsOrToast();
+  if (!ids.length || !confirm(`删除选中的 ${ids.length} 个节点？`)) return;
+  runAction(() => deleteSelectedNodes(ids), '已批量删除');
+});
+
 $('#dashboardForm').addEventListener('submit', (event) => {
   event.preventDefault();
   const switchMode = selectedSwitchMode();
@@ -331,6 +423,17 @@ $('#groupForm').addEventListener('submit', (event) => {
     await request('/api/groups', { method: 'POST', body: JSON.stringify({ name }) });
     $('#groupName').value = '';
   }, '分组已创建');
+});
+
+$('#groupTestIntervalForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  runAction(async () => {
+    const minutes = Math.max(1, Number($('#groupTestIntervalMin').value || 10));
+    await request('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ testIntervalSec: minutes * 60 })
+    });
+  }, '自动测速间隔已保存');
 });
 
 $('#importForm').addEventListener('submit', (event) => {
@@ -390,6 +493,24 @@ $('#settingsForm').addEventListener('submit', (event) => {
 });
 
 document.addEventListener('change', (event) => {
+  if (event.target.id === 'selectAllNodes') {
+    state.selectedNodeIds.clear();
+    if (event.target.checked) {
+      for (const node of state.data?.nodes || []) state.selectedNodeIds.add(node.id);
+    }
+    renderNodes(state.data);
+    return;
+  }
+
+  const nodeSelect = event.target.dataset.nodeSelect;
+  if (nodeSelect) {
+    if (event.target.checked) state.selectedNodeIds.add(nodeSelect);
+    else state.selectedNodeIds.delete(nodeSelect);
+    event.target.closest('tr')?.classList.toggle('selected-row', event.target.checked);
+    updateBulkSelectionUi(state.data);
+    return;
+  }
+
   const groupId = event.target.dataset.groupSelect;
   if (!groupId) return;
   runAction(() => request(`/api/groups/${encodeURIComponent(groupId)}`, {

@@ -21,19 +21,19 @@ ARCH_RAW="$(uname -m)"
 case "${ARCH_RAW}" in
   x86_64|amd64) ARCH_SUFFIX="x64" ;;
   aarch64|arm64) ARCH_SUFFIX="arm64" ;;
-  *) echo "Unsupported architecture: ${ARCH_RAW}"; exit 1 ;;
+  *) echo "不支持的系统架构：${ARCH_RAW}"; exit 1 ;;
 esac
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    echo "Please run as root or with sudo."
+    echo "请使用 root 用户或 sudo 运行此脚本。"
     exit 1
   fi
 }
 
 require_systemd() {
   if ! command -v systemctl >/dev/null 2>&1; then
-    echo "systemd is required."
+    echo "此脚本需要 systemd。"
     exit 1
   fi
 }
@@ -56,12 +56,12 @@ is_github_artifact_api_url() {
 download_failed_hint() {
   local url="$1"
 
-  echo "Download failed: ${url}"
+  echo "下载失败：${url}"
   if is_github_artifact_api_url "${url}"; then
-    echo "GitHub Actions artifact downloads may require authentication."
-    echo "Use a token with Actions read permission:"
-    echo "  sudo LEME_GITHUB_TOKEN=\"YOUR_TOKEN\" LEME_DOWNLOAD_URL=\"YOUR_ARTIFACT_URL\" bash install-server.sh"
-    echo "Recommended on servers: use the Release URL instead:"
+    echo "GitHub Actions 构建产物下载可能需要登录鉴权。"
+    echo "如果必须使用 Actions artifact 链接，请提供有 Actions 读取权限的 token："
+    echo "  sudo LEME_GITHUB_TOKEN=\"你的_TOKEN\" LEME_DOWNLOAD_URL=\"你的_ARTIFACT_链接\" bash install-server.sh"
+    echo "更推荐服务器使用 Release 下载地址："
     echo "  ${DEFAULT_DOWNLOAD_URL}"
   fi
 }
@@ -98,7 +98,7 @@ fetch_file() {
       exit 1
     fi
   else
-    echo "curl or wget is required."
+    echo "需要先安装 curl 或 wget。"
     exit 1
   fi
 }
@@ -120,7 +120,7 @@ ensure_unzip() {
     return
   fi
 
-  echo "unzip not found, installing..."
+  echo "未找到 unzip，正在自动安装..."
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     apt-get install -y unzip
@@ -133,24 +133,24 @@ ensure_unzip() {
   elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm unzip
   else
-    echo "Please install unzip first."
+    echo "请先手动安装 unzip。"
     exit 1
   fi
 }
 
 install_sing_box() {
   if command -v sing-box >/dev/null 2>&1; then
-    echo "sing-box found: $(command -v sing-box)"
+    echo "已找到 sing-box：$(command -v sing-box)"
     return
   fi
 
-  echo "sing-box not found, installing..."
+  echo "未找到 sing-box，正在自动安装..."
   if command -v curl >/dev/null 2>&1; then
     curl -fsSL https://sing-box.app/install.sh | sh
   elif command -v wget >/dev/null 2>&1; then
     wget -qO- https://sing-box.app/install.sh | sh
   else
-    echo "curl or wget is required to install sing-box."
+    echo "安装 sing-box 需要 curl 或 wget。"
     exit 1
   fi
 
@@ -230,7 +230,7 @@ find_local_archive() {
 install_binary_file() {
   local source="$1"
   if ! is_elf "${source}"; then
-    echo "The selected file is not a Linux executable: ${source}"
+    echo "选中的文件不是 Linux 可执行文件：${source}"
     exit 1
   fi
 
@@ -248,8 +248,8 @@ install_archive_file() {
 
   binary="$(find_binary_in_dir "${EXTRACT_DIR}" || true)"
   if [[ -z "${binary}" ]]; then
-    echo "No matching binary found in artifact for ${ARCH_RAW} (${ARCH_SUFFIX})."
-    echo "Expected: siftlane-linux-${ARCH_SUFFIX}"
+    echo "构建产物里没有找到适合 ${ARCH_RAW}（${ARCH_SUFFIX}）的程序文件。"
+    echo "期望文件名：siftlane-linux-${ARCH_SUFFIX}"
     exit 1
   fi
 
@@ -261,13 +261,25 @@ download_and_install() {
 
   mkdir -p "${DOWNLOAD_DIR}"
   rm -f "${download_file}"
-  echo "Downloading artifact from: ${DOWNLOAD_URL}"
+  echo "正在下载构建产物：${DOWNLOAD_URL}"
   fetch_file "${DOWNLOAD_URL}" "${download_file}"
 
   if is_zip "${download_file}"; then
     install_archive_file "${download_file}"
   else
     install_binary_file "${download_file}"
+  fi
+}
+
+cleanup_cache() {
+  local quiet="${1:-0}"
+
+  rm -rf "${EXTRACT_DIR}"
+  rm -f "${DOWNLOAD_DIR}/siftlane-download"
+  rmdir "${DOWNLOAD_DIR}" >/dev/null 2>&1 || true
+
+  if [[ "${quiet}" != "1" ]]; then
+    echo "已清理临时下载文件和解压缓存。"
   fi
 }
 
@@ -324,12 +336,12 @@ install_or_update() {
 
   local_binary="$(find_local_binary || true)"
   if [[ -n "${local_binary}" ]]; then
-    echo "Using local binary first: ${local_binary}"
+    echo "优先使用本地程序文件：${local_binary}"
     install_binary_file "${local_binary}"
   else
     local_archive="$(find_local_archive || true)"
     if [[ -n "${local_archive}" ]]; then
-      echo "Using local artifact first: ${local_archive}"
+      echo "优先使用本地压缩包：${local_archive}"
       install_archive_file "${local_archive}"
     else
       download_and_install
@@ -343,18 +355,20 @@ install_or_update() {
 
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}"
+  cleanup_cache 1
 
   local server_ip
   server_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
   server_ip="${server_ip:-SERVER_IP}"
 
   echo
-  echo "Siftlane installed."
-  echo "Open: http://${server_ip}:${PORT}"
-  echo "Root: ${ROOT_DIR}"
-  echo "Binary: ${BINARY_PATH}"
-  echo "Data: ${DATA_DIR}"
-  echo "Commands:"
+  echo "Siftlane 已安装并启动。"
+  echo "访问地址：http://${server_ip}:${PORT}"
+  echo "安装目录：${ROOT_DIR}"
+  echo "程序文件：${BINARY_PATH}"
+  echo "数据目录：${DATA_DIR}"
+  echo "临时文件：已清理下载缓存和解压目录"
+  echo "常用命令："
   echo "  systemctl status ${SERVICE_NAME}"
   echo "  systemctl restart ${SERVICE_NAME}"
   echo "  journalctl -u ${SERVICE_NAME} -n 100 --no-pager"
@@ -373,36 +387,38 @@ uninstall() {
   rm -f "${SERVICE_FILE}" "${ENV_FILE}" "${BINARY_PATH}"
   systemctl daemon-reload
 
-  read -r -p "Remove ${ROOT_DIR}/data and downloaded artifacts? [y/N]: " remove_data
+  read -r -p "是否删除 ${ROOT_DIR}/data 和下载缓存？[y/N]: " remove_data
   if [[ "${remove_data:-N}" =~ ^[Yy]$ ]]; then
     rm -rf "${DATA_DIR}" "${DOWNLOAD_DIR}" "${EXTRACT_DIR}"
   fi
 }
 
 usage() {
-  echo "Usage: bash install-server.sh [install|update|uninstall|status|logs]"
+  echo "用法：bash install-server.sh [install|update|uninstall|status|logs|clean]"
 }
 
 menu() {
-  echo "Siftlane installer"
-  echo "Root: ${ROOT_DIR}"
-  echo "Architecture: ${ARCH_RAW} -> ${ARCH_SUFFIX}"
+  echo "Siftlane 安装管理脚本"
+  echo "安装目录：${ROOT_DIR}"
+  echo "系统架构：${ARCH_RAW} -> ${ARCH_SUFFIX}"
   echo
-  echo "1) Install"
-  echo "2) Update"
-  echo "3) Uninstall"
-  echo "4) Status"
-  echo "5) Logs"
-  echo "0) Exit"
-  read -r -p "Choose [1]: " choice
+  echo "1) 安装 / 启动"
+  echo "2) 更新"
+  echo "3) 卸载"
+  echo "4) 查看状态"
+  echo "5) 查看日志"
+  echo "6) 清理缓存"
+  echo "0) 退出"
+  read -r -p "请选择 [1]: " choice
   case "${choice:-1}" in
     1) install_or_update 0 ;;
     2) install_or_update 1 ;;
     3) uninstall ;;
     4) show_status ;;
     5) show_logs ;;
+    6) cleanup_cache ;;
     0) exit 0 ;;
-    *) echo "Invalid choice"; exit 1 ;;
+    *) echo "无效选择"; exit 1 ;;
   esac
 }
 
@@ -416,6 +432,7 @@ main() {
     uninstall|remove) uninstall ;;
     status) show_status ;;
     logs) show_logs ;;
+    clean|cleanup) cleanup_cache ;;
     -h|--help|help) usage ;;
     menu|'') menu ;;
     *) usage; exit 1 ;;
