@@ -1226,7 +1226,8 @@ async function handleApi(req, res, pathname) {
   if (groupMatch && req.method === 'DELETE') {
     const group = state.groups.find((item) => item.id === groupMatch[1]);
     if (group) {
-      state.nodes = state.nodes.map((node) => node.group === group.name ? { ...node, group: '' } : node);
+      const groupNodeIds = new Set(group.nodeIds || []);
+      state.nodes = state.nodes.filter((node) => node.group !== group.name && !groupNodeIds.has(node.id));
       state.groups = state.groups.filter((item) => item.id !== group.id);
       syncGroups(state);
       saveState();

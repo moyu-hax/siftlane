@@ -568,7 +568,7 @@ document.addEventListener('click', (event) => {
   } else if (groupTest) {
     runAction(() => request('/api/test', { method: 'POST', body: JSON.stringify({ groupId: groupTest }) }), '分组测速完成');
   } else if (groupDelete) {
-    if (!confirm('删除这个分组？')) return;
+    if (!confirm('删除这个分组？该分组下的节点也会一起删除。')) return;
     runAction(() => request(`/api/groups/${encodeURIComponent(groupDelete)}`, { method: 'DELETE' }), '分组已删除');
   }
 });
