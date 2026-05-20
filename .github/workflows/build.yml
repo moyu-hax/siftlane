@@ -1,0 +1,43 @@
+name: Build Siftlane
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build Linux binaries
+        run: npm run build:linux
+
+      - name: List build outputs
+        run: ls -la dist
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p release
+          cp dist/siftlane-linux-x64 release/siftlane-linux-x64
+          cp dist/siftlane-linux-arm64 release/siftlane-linux-arm64
+          chmod +x release/siftlane-linux-*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: siftlane-linux
+          path: |
+            release/siftlane-linux-x64
+            release/siftlane-linux-arm64
+          if-no-files-found: error

@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Siftlane</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="loginView" class="auth-shell hidden">
+    <section class="auth-panel">
+      <div class="brand-row">
+        <div class="brand-mark">S</div>
+        <div>
+          <h1>Siftlane</h1>
+          <p id="authModeText">登录</p>
+        </div>
+      </div>
+      <form id="authForm" class="stack">
+        <label>
+          <span>Web 密码</span>
+          <input id="authPassword" type="password" autocomplete="current-password" minlength="6" required>
+        </label>
+        <button class="primary" type="submit" id="authSubmit">登录</button>
+        <div id="authError" class="form-error hidden"></div>
+      </form>
+    </section>
+  </main>
+
+  <main id="appView" class="app hidden">
+    <header class="topbar">
+      <div class="brand-row">
+        <div class="brand-mark">S</div>
+        <div>
+          <h1>Siftlane</h1>
+          <p>轻量节点健康网关</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" class="ghost" type="button">刷新</button>
+        <button id="logoutBtn" class="ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <section class="status-grid">
+      <article>
+        <span>核心</span>
+        <strong id="coreStatus">--</strong>
+      </article>
+      <article>
+        <span>可用节点</span>
+        <strong id="healthyCount">0/0</strong>
+      </article>
+      <article>
+        <span>活动分组</span>
+        <strong id="activeGroupName">--</strong>
+      </article>
+      <article>
+        <span>上次测速</span>
+        <strong id="lastTestAt">--</strong>
+      </article>
+    </section>
+
+    <section class="toolbar">
+      <button id="startCoreBtn" class="primary" type="button">启动核心</button>
+      <button id="stopCoreBtn" type="button">停止核心</button>
+      <button id="restartCoreBtn" type="button">重启核心</button>
+      <button id="testAllBtn" type="button">全部测速</button>
+    </section>
+
+    <section class="layout">
+      <div class="main-column">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>分组</h2>
+            <form id="groupForm" class="inline-form">
+              <input id="groupName" placeholder="新分组名称">
+              <button type="submit">新增</button>
+            </form>
+          </div>
+          <div id="groupsList" class="group-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>节点</h2>
+            <div class="muted" id="nodeCount">0 个节点</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>分组</th>
+                  <th>地址</th>
+                  <th>状态</th>
+                  <th>延迟</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="nodesTable"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <aside class="side-column">
+        <section class="panel">
+          <h2>导入</h2>
+          <form id="importForm" class="stack">
+            <input id="importGroup" placeholder="分组名称">
+            <textarea id="importText" rows="7" placeholder="节点链接，每行一个"></textarea>
+            <button class="primary" type="submit">导入节点</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>新增节点</h2>
+          <form id="nodeForm" class="stack compact">
+            <select id="nodeType">
+              <option value="socks">SOCKS</option>
+              <option value="http">HTTP</option>
+              <option value="shadowsocks">Shadowsocks</option>
+              <option value="vless">VLESS</option>
+              <option value="vmess">VMess</option>
+              <option value="trojan">Trojan</option>
+            </select>
+            <input id="nodeName" placeholder="名称">
+            <input id="nodeGroup" placeholder="分组">
+            <input id="nodeServer" placeholder="服务器">
+            <input id="nodePort" placeholder="端口" inputmode="numeric">
+            <input id="nodeUuid" placeholder="UUID">
+            <input id="nodePassword" placeholder="密码">
+            <input id="nodeMethod" placeholder="加密方法">
+            <input id="nodeSecurity" placeholder="security，例如 tls">
+            <input id="nodeSni" placeholder="SNI">
+            <button type="submit">保存节点</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <h2>设置</h2>
+          <form id="settingsForm" class="stack compact">
+            <label><span>sing-box 路径</span><input id="settingSingBox"></label>
+            <label><span>测速地址</span><input id="settingTestUrl"></label>
+            <label><span>测速间隔秒</span><input id="settingInterval" inputmode="numeric"></label>
+            <label><span>代理监听</span><input id="settingProxyHost"></label>
+            <label><span>HTTP 端口</span><input id="settingHttpPort" inputmode="numeric"></label>
+            <label><span>SOCKS 端口</span><input id="settingSocksPort" inputmode="numeric"></label>
+            <label><span>新 Web 密码</span><input id="settingPassword" type="password" minlength="6"></label>
+            <button type="submit">保存设置</button>
+          </form>
+        </section>
+      </aside>
+    </section>
+
+    <section class="panel logs-panel">
+      <div class="panel-head">
+        <h2>日志</h2>
+        <span id="testingFlag" class="muted"></span>
+      </div>
+      <pre id="logs"></pre>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

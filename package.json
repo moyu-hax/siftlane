@@ -1,0 +1,22 @@
+{
+  "name": "siftlane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lightweight node health gate and sing-box control panel.",
+  "bin": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "build:linux:x64": "pkg . --targets node20-linux-x64 --output dist/siftlane-linux-x64",
+    "build:linux:arm64": "pkg . --targets node20-linux-arm64 --output dist/siftlane-linux-arm64",
+    "build:linux": "npm run build:linux:x64 && npm run build:linux:arm64"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*"
+    ],
+    "outputPath": "dist"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.6.0"
+  }
+}
