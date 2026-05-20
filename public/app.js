@@ -105,7 +105,7 @@ function updateBulkSelectionUi(data = state.data) {
     selectAll.indeterminate = count > 0 && count < nodes.length;
   }
 
-  ['#batchGroupBtn', '#batchDisableBtn', '#batchTestBtn', '#batchDeleteBtn'].forEach((selector) => {
+  ['#batchGroupBtn', '#batchEnableBtn', '#batchDisableBtn', '#batchTestBtn', '#batchDeleteBtn'].forEach((selector) => {
     const button = $(selector);
     if (button) button.disabled = count === 0;
   });
@@ -174,11 +174,23 @@ function render() {
   renderSettings(data);
 }
 
+function currentUptimeSec(data = state.data) {
+  if (!data || data.core?.status !== 'running') return 0;
+  const startedAt = Date.parse(data.core?.startedAt || '');
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return data.dashboard?.uptimeSec || 0;
+  return Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+}
+
+function updateUptimeText(data = state.data) {
+  const el = $('#uptimeText');
+  if (el) el.textContent = formatDuration(currentUptimeSec(data));
+}
+
 function renderDashboard(data) {
   const healthy = data.nodes.filter(usableNode).length;
   const current = data.dashboard?.currentNode || null;
   $('#coreStatus').textContent = statusText(data.core.status);
-  $('#uptimeText').textContent = formatDuration(data.dashboard?.uptimeSec || 0);
+  updateUptimeText(data);
   $('#healthyCount').textContent = `${healthy}/${data.nodes.length}`;
   $('#lastTestAt').textContent = formatTime(data.settings.lastTestAt);
   $('#testingFlag').textContent = data.testing ? '测速中' : '';
@@ -383,6 +395,12 @@ $('#batchGroupBtn').addEventListener('click', () => {
   runAction(() => updateSelectedNodes(ids, { group }), '批量分组已完成');
 });
 
+$('#batchEnableBtn').addEventListener('click', () => {
+  const ids = getSelectedNodeIdsOrToast();
+  if (!ids.length) return;
+  runAction(() => updateSelectedNodes(ids, { enabled: true, autoDisabled: false }), '已批量启用');
+});
+
 $('#batchDisableBtn').addEventListener('click', () => {
   const ids = getSelectedNodeIdsOrToast();
   if (!ids.length) return;
@@ -574,6 +592,12 @@ document.addEventListener('click', (event) => {
 });
 
 checkSession();
+setInterval(() => {
+  if (!$('#appView').classList.contains('hidden')) {
+    updateUptimeText();
+  }
+}, 1000);
+
 setInterval(() => {
   if (!$('#appView').classList.contains('hidden')) {
     loadState().catch(() => {});

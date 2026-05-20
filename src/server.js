@@ -32,6 +32,7 @@ const core = {
 };
 
 let testing = false;
+let suppressCanceledLogsUntil = 0;
 let state = loadState();
 
 function createId(prefix = '') {
@@ -462,9 +463,14 @@ function publicState() {
   };
 }
 
+function isExpectedCanceledLog(text) {
+  return /operation was canceled|context canceled|connection upload closed: stream \d+ canceled by remote/i.test(text);
+}
+
 function appendCoreLog(line) {
   const text = stripAnsi(line).trim();
   if (!text || /read http request: EOF/i.test(text)) return;
+  if (Date.now() < suppressCanceledLogsUntil && isExpectedCanceledLog(text)) return;
   const entry = { at: new Date().toISOString(), line: text };
   core.logs.push(entry);
   console.log(`[${entry.at}] ${text}`);
@@ -701,8 +707,12 @@ async function stopCore() {
 }
 
 async function restartCore() {
+  suppressCanceledLogsUntil = Date.now() + 10000;
+  appendCoreLog('配置变更，正在重启核心');
   await stopCore();
-  return startCore();
+  const result = await startCore();
+  suppressCanceledLogsUntil = Date.now() + 3000;
+  return result;
 }
 
 function getFreePort() {
@@ -1083,6 +1093,24 @@ function updateNode(id, patch) {
   return next;
 }
 
+function updateNodes(ids, patch) {
+  const selectedIds = new Set((ids || []).map(normalizeString).filter(Boolean));
+  if (!selectedIds.size) throw new Error('请先选择节点');
+  const updated = [];
+  for (let index = 0; index < state.nodes.length; index += 1) {
+    const node = state.nodes[index];
+    if (!selectedIds.has(node.id)) continue;
+    const next = normalizeNode({ ...node, ...patch, id: node.id });
+    if (!next) throw new Error('节点无效');
+    state.nodes[index] = next;
+    updated.push(next);
+  }
+  if (!updated.length) throw new Error('节点未找到');
+  syncGroups(state);
+  saveState();
+  return updated;
+}
+
 function deleteNode(id) {
   state.nodes = state.nodes.filter((node) => node.id !== id);
   syncGroups(state);
@@ -1183,6 +1211,14 @@ async function handleApi(req, res, pathname) {
     syncGroups(state);
     saveState();
     sendJson(res, 200, { ok: true, node, ...publicState() });
+    return;
+  }
+
+  if (pathname === '/api/nodes/batch' && req.method === 'PUT') {
+    const body = await readJsonBody(req);
+    const nodes = updateNodes(Array.isArray(body.ids) ? body.ids : [], body.patch || {});
+    if (core.process) await restartCore();
+    sendJson(res, 200, { ok: true, nodes, ...publicState() });
     return;
   }
 
