@@ -175,11 +175,27 @@
             </div>
             <form id="groupTestIntervalForm" class="interval-form">
               <label>
-                <span>自动测速间隔（分钟）</span>
+                <span>??????????</span>
                 <input id="groupTestIntervalMin" type="number" min="1" max="1440" inputmode="numeric">
               </label>
-              <button type="submit">保存间隔</button>
+              <button type="submit">????</button>
             </form>
+            <form id="subscriptionForm" class="subscription-form">
+              <label>
+                <span>????</span>
+                <input id="subscriptionGroupName" list="groupNameList" placeholder="????">
+              </label>
+              <label class="wide">
+                <span>????</span>
+                <input id="subscriptionUrl" placeholder="https://">
+              </label>
+              <label>
+                <span>??????????</span>
+                <input id="subscriptionIntervalMin" type="number" min="1" max="10080" inputmode="numeric" value="60">
+              </label>
+              <button type="submit">?????</button>
+            </form>
+            <datalist id="groupNameList"></datalist>
             <div id="groupsList" class="group-list"></div>
           </article>
 
@@ -301,6 +317,42 @@
                 <span>测速策略</span>
                 <strong>失败自动禁用，恢复自动启用</strong>
               </div>
+            </div>
+          </article>
+
+
+          <article class="panel">
+            <div class="panel-head">
+              <div>
+                <h3>?????</h3>
+                <p class="muted">iptables INPUT ??</p>
+              </div>
+              <span id="firewallStatus" class="muted">--</span>
+            </div>
+            <div class="firewall-panel">
+              <label>
+                <span>?? IP / ??</span>
+                <input id="firewallSource" placeholder="172.22.0.0/16">
+              </label>
+              <div class="firewall-port-grid">
+                <div>
+                  <span>HTTP ??</span>
+                  <strong id="firewallHttpPort">--</strong>
+                </div>
+                <div class="button-pair">
+                  <button type="button" data-firewall-action="open" data-firewall-port="http">?? HTTP</button>
+                  <button type="button" data-firewall-action="delete" data-firewall-port="http">?? HTTP</button>
+                </div>
+                <div>
+                  <span>SOCKS ??</span>
+                  <strong id="firewallSocksPort">--</strong>
+                </div>
+                <div class="button-pair">
+                  <button type="button" data-firewall-action="open" data-firewall-port="socks">?? SOCKS</button>
+                  <button type="button" data-firewall-action="delete" data-firewall-port="socks">?? SOCKS</button>
+                </div>
+              </div>
+              <div id="firewallRules" class="firewall-rules"></div>
             </div>
           </article>
         </section>

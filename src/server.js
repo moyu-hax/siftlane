@@ -7,7 +7,7 @@ const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const tls = require('tls');
 const { URL } = require('url');
 
@@ -33,6 +33,7 @@ const core = {
 
 let testing = false;
 let suppressCanceledLogsUntil = 0;
+let syncingSubscriptions = false;
 let state = loadState();
 
 function createId(prefix = '') {
@@ -186,7 +187,11 @@ function normalizeNode(node) {
     pbk: normalizeString(node.pbk),
     sid: normalizeString(node.sid),
     flow: normalizeString(node.flow),
-    fingerprint: normalizeString(node.fingerprint || node.fp)
+    fingerprint: normalizeString(node.fingerprint || node.fp),
+    sourceType: normalizeString(node.sourceType) || 'manual',
+    sourceGroupId: normalizeString(node.sourceGroupId) || null,
+    sourceUrl: normalizeString(node.sourceUrl) || null,
+    sourceKey: normalizeString(node.sourceKey) || null
   };
 }
 
@@ -199,7 +204,12 @@ function normalizeGroup(group) {
     id,
     name,
     nodeIds: Array.isArray(group.nodeIds) ? [...new Set(group.nodeIds.map(normalizeString).filter(Boolean))] : [],
-    selectedNodeId: normalizeString(group.selectedNodeId) || null
+    selectedNodeId: normalizeString(group.selectedNodeId) || null,
+    subscriptionUrl: normalizeString(group.subscriptionUrl),
+    subscriptionUpdateIntervalMin: normalizeString(group.subscriptionUrl) ? Math.min(10080, Math.max(1, toInt(group.subscriptionUpdateIntervalMin, 60))) : 0,
+    subscriptionLastSyncAt: normalizeIso(group.subscriptionLastSyncAt),
+    subscriptionLastError: normalizeString(group.subscriptionLastError) || null,
+    subscriptionLastCount: Math.max(0, toInt(group.subscriptionLastCount, 0))
   };
 }
 
@@ -216,6 +226,7 @@ function syncGroups(targetState = state) {
     const existing = existingByName.get(groupName);
     const ids = targetState.nodes.filter((item) => item.group === groupName).map((item) => item.id);
     groups.push({
+      ...(existing || {}),
       id: existing?.id || createId('group_'),
       name: groupName,
       nodeIds: ids,
@@ -459,7 +470,8 @@ function publicState() {
       lastError: core.lastError,
       logs: core.logs.slice(-120)
     },
-    testing
+    testing,
+    firewall: getFirewallState()
   };
 }
 
@@ -917,10 +929,199 @@ async function runAutoTestIfDue() {
   }
 }
 
-function importNodes(text, groupName = '') {
+function normalizeSubscriptionContent(raw) {
+  const text = normalizeString(raw).replace(/\uFEFF/g, '');
+  if (!text) return '';
+  if (text.includes('://') || /^[\[{]/.test(text)) return text;
+
+  const compact = text.replace(/\s+/g, '');
+  if (!compact || compact.length < 16 || !/^[A-Za-z0-9+/=_-]+$/.test(compact)) return text;
+
+  try {
+    const decoded = decodeBase64(compact).trim();
+    if (decoded.includes('://') || /^[\[{]/.test(decoded)) return decoded;
+  } catch {
+    // ignore
+  }
+
+  return text;
+}
+
+async function fetchRemoteText(url, timeoutMs = 15000) {
+  if (typeof fetch !== 'function') throw new Error('当前环境不支持 fetch');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: 'text/plain, application/json;q=0.9, */*;q=0.8'
+      }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function getGroupById(id) {
+  return state.groups.find((group) => group.id === id) || null;
+}
+
+function normalizeFirewallSource(value) {
+  const text = normalizeString(value);
+  if (!text) throw new Error('来源 IP 或网段不能为空');
+  const match = text.match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/);
+  if (!match) throw new Error('仅支持 IPv4 或 IPv4/CIDR');
+  const octets = match[1].split('.').map((part) => Number(part));
+  if (octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) throw new Error('来源 IP 无效');
+  if (match[2] !== undefined) {
+    const mask = Number(match[2]);
+    if (!Number.isInteger(mask) || mask < 0 || mask > 32) throw new Error('网段掩码无效');
+  }
+  return text;
+}
+
+function normalizeFirewallPort(value) {
+  const port = toInt(value, 0);
+  if (port < 1 || port > 65535) throw new Error('端口无效');
+  return port;
+}
+
+function runIptables(args) {
+  return execFileSync('iptables', ['-w', ...args], { encoding: 'utf8' });
+}
+
+function firewallRuleArgs(source, port) {
+  return ['-s', source, '-p', 'tcp', '--dport', String(port), '-j', 'ACCEPT'];
+}
+
+function getFirewallState() {
+  const ports = new Set([state.settings.httpPort, state.settings.socksPort].map((value) => toInt(value, 0)).filter((value) => value > 0));
+  try {
+    const output = runIptables(['-S', 'INPUT']);
+    const rules = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => {
+        if (!line.startsWith('-A INPUT')) return false;
+        if (!line.includes('-j ACCEPT') || !line.includes('-p tcp')) return false;
+        const match = line.match(/--dport\s+(\d+)/);
+        return match && ports.has(Number(match[1]));
+      });
+    return {
+      available: true,
+      ports: { http: state.settings.httpPort, socks: state.settings.socksPort },
+      rules
+    };
+  } catch (error) {
+    return {
+      available: false,
+      ports: { http: state.settings.httpPort, socks: state.settings.socksPort },
+      rules: [],
+      error: normalizeString(error.message) || 'iptables 不可用'
+    };
+  }
+}
+
+function openFirewallRule(source, port) {
+  const args = firewallRuleArgs(source, port);
+  try {
+    runIptables(['-C', 'INPUT', ...args]);
+  } catch {
+    runIptables(['-I', 'INPUT', '1', ...args]);
+  }
+}
+
+function deleteFirewallRule(source, port) {
+  const args = firewallRuleArgs(source, port);
+  try {
+    runIptables(['-D', 'INPUT', ...args]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeSubscriptionUpdateInterval(value) {
+  return Math.min(10080, Math.max(1, toInt(value, 60)));
+}
+
+async function refreshSubscriptionGroup(group, { force = false } = {}) {
+  const targetGroup = getGroupById(group?.id) || group;
+  if (!targetGroup) throw new Error('分组未找到');
+  const subscriptionUrl = normalizeString(targetGroup.subscriptionUrl);
+  if (!subscriptionUrl) throw new Error('请先填写订阅链接');
+
+  const intervalMs = normalizeSubscriptionUpdateInterval(targetGroup.subscriptionUpdateIntervalMin) * 60 * 1000;
+  if (!force && targetGroup.subscriptionLastSyncAt) {
+    const last = Date.parse(targetGroup.subscriptionLastSyncAt);
+    if (Number.isFinite(last) && Date.now() - last < intervalMs) {
+      return { changed: false, skipped: true, importedCount: targetGroup.subscriptionLastCount || 0 };
+    }
+  }
+
+  const raw = await fetchRemoteText(subscriptionUrl);
+  const decoded = normalizeSubscriptionContent(raw);
+  const imported = importNodes(decoded, targetGroup.name, {
+    sourceType: 'subscription',
+    sourceGroupId: targetGroup.id,
+    sourceUrl: subscriptionUrl
+  });
+  if (!imported.length) throw new Error('订阅里没有可用节点');
+
+  state.nodes = state.nodes.filter((node) => node.sourceType !== 'subscription' || node.sourceGroupId !== targetGroup.id);
+  state.nodes.push(...imported);
+  targetGroup.subscriptionLastSyncAt = new Date().toISOString();
+  targetGroup.subscriptionLastError = null;
+  targetGroup.subscriptionLastCount = imported.length;
+  syncGroups(state);
+  return { changed: true, importedCount: imported.length };
+}
+
+async function runGroupSubscriptionSyncIfDue() {
+  if (testing || syncingSubscriptions || !state.groups.length) return false;
+  const dueGroups = state.groups.filter((group) => group.subscriptionUrl && normalizeSubscriptionUpdateInterval(group.subscriptionUpdateIntervalMin) > 0)
+    .filter((group) => {
+      const last = group.subscriptionLastSyncAt ? Date.parse(group.subscriptionLastSyncAt) : 0;
+      return !Number.isFinite(last) || Date.now() - last >= normalizeSubscriptionUpdateInterval(group.subscriptionUpdateIntervalMin) * 60 * 1000;
+    });
+
+  if (!dueGroups.length) return false;
+
+  syncingSubscriptions = true;
+  const before = runtimeSignature();
+  let changed = false;
+  try {
+    for (const group of dueGroups) {
+      try {
+        const result = await refreshSubscriptionGroup(group, { force: true });
+        changed = changed || Boolean(result.changed);
+      } catch (error) {
+        group.subscriptionLastError = error.message;
+        group.subscriptionLastSyncAt = new Date().toISOString();
+        appendCoreLog(`订阅更新失败：${group.name} - ${error.message}`);
+      }
+    }
+    saveState();
+    const after = runtimeSignature();
+    if (changed && core.process && before !== after) {
+      await restartCore();
+    }
+    return changed;
+  } finally {
+    syncingSubscriptions = false;
+  }
+}
+
+function importNodes(text, groupName = '', options = {}) {
   const raw = normalizeString(text);
   if (!raw) return [];
   const imported = [];
+  const sourceType = normalizeString(options.sourceType) || 'manual';
+  const sourceGroupId = normalizeString(options.sourceGroupId) || null;
+  const sourceUrl = normalizeString(options.sourceUrl) || null;
 
   try {
     const parsed = JSON.parse(raw);
@@ -931,7 +1132,10 @@ function importNodes(text, groupName = '') {
         id: createId('node_'),
         name: item.name || item.tag || item.server,
         port: item.port || item.server_port,
-        group: groupName || item.group || item.tag || ''
+        group: groupName || item.group || item.tag || '',
+        sourceType,
+        sourceGroupId,
+        sourceUrl
       });
       if (node) imported.push(node);
     }
@@ -942,7 +1146,9 @@ function importNodes(text, groupName = '') {
 
   for (const line of raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
     const node = parseProxyLink(line, groupName);
-    if (node) imported.push(node);
+    if (node) {
+      imported.push(normalizeNode({ ...node, sourceType, sourceGroupId, sourceUrl }));
+    }
   }
   return imported;
 }
@@ -1275,6 +1481,82 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (pathname === '/api/groups/subscription' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const groupId = normalizeString(body.groupId);
+    const groupName = normalizeString(body.groupName || body.group || body.name);
+    const subscriptionUrl = normalizeString(body.subscriptionUrl || body.url);
+    let group = groupId ? state.groups.find((item) => item.id === groupId) : null;
+    if (!group) {
+      if (!groupName) throw new Error('????????');
+      if (!subscriptionUrl) throw new Error('????????');
+      group = state.groups.find((item) => item.name === groupName);
+      if (!group) {
+        group = { id: createId('group_'), name: groupName, nodeIds: [], selectedNodeId: null };
+        state.groups.push(group);
+      }
+    } else if (!subscriptionUrl) {
+      throw new Error('????????');
+    }
+
+    const subscriptionUpdateIntervalMin = normalizeSubscriptionUpdateInterval(body.subscriptionUpdateIntervalMin || body.intervalMin);
+    group.subscriptionUrl = subscriptionUrl;
+    group.subscriptionUpdateIntervalMin = subscriptionUpdateIntervalMin;
+    group.subscriptionLastError = null;
+
+    let syncError = null;
+    let syncedCount = 0;
+    const before = runtimeSignature();
+    try {
+      const result = await refreshSubscriptionGroup(group, { force: true });
+      syncedCount = result.importedCount || 0;
+    } catch (error) {
+      syncError = error.message;
+      group.subscriptionLastError = syncError;
+      group.subscriptionLastSyncAt = new Date().toISOString();
+    }
+
+    applyGroupSelections();
+    saveState();
+    if (core.process && !syncError && before !== runtimeSignature()) await restartCore();
+    sendJson(res, 200, { ok: true, syncedCount, syncError, ...publicState() });
+    return;
+  }
+
+  const groupSubscriptionSyncMatch = pathname.match(/^\/api\/groups\/([^/]+)\/subscription-sync$/);
+  if (groupSubscriptionSyncMatch && req.method === 'POST') {
+    const group = state.groups.find((item) => item.id === groupSubscriptionSyncMatch[1]);
+    if (!group) throw new Error('分组未找到');
+    if (!group.subscriptionUrl) throw new Error('该分组还没有订阅链接');
+
+    const before = runtimeSignature();
+    const result = await refreshSubscriptionGroup(group, { force: true });
+    applyGroupSelections();
+    saveState();
+    if (core.process && before !== runtimeSignature()) await restartCore();
+    sendJson(res, 200, { ok: true, syncedCount: result.importedCount || 0, ...publicState() });
+    return;
+  }
+
+  if (pathname === '/api/firewall' && req.method === 'GET') {
+    sendJson(res, 200, { ok: true, firewall: getFirewallState() });
+    return;
+  }
+
+  if (pathname === '/api/firewall' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const source = normalizeFirewallSource(body.source);
+    const port = normalizeFirewallPort(body.port);
+    const action = normalizeString(body.action) || 'open';
+    if (action === 'delete') {
+      deleteFirewallRule(source, port);
+    } else {
+      openFirewallRule(source, port);
+    }
+    sendJson(res, 200, { ok: true, firewall: getFirewallState() });
+    return;
+  }
+
   if (pathname === '/api/test' && req.method === 'POST') {
     const body = await readJsonBody(req);
     let ids = Array.isArray(body.ids) ? body.ids : [];
@@ -1347,8 +1629,12 @@ const server = http.createServer(async (req, res) => {
 });
 
 setInterval(() => {
-  void runAutoTestIfDue();
-  void runAutoSwitchIfDue();
+  void (async () => {
+    const subscriptionsChanged = await runGroupSubscriptionSyncIfDue();
+    if (subscriptionsChanged) return;
+    await runAutoTestIfDue();
+    await runAutoSwitchIfDue();
+  })();
 }, TEST_TICK_MS).unref?.();
 
 process.once('SIGINT', async () => {

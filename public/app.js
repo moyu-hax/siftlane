@@ -80,6 +80,50 @@ function groupNodes(group) {
   return (state.data?.nodes || []).filter((node) => ids.has(node.id));
 }
 
+function getGroupById(id) {
+  return state.data?.groups.find((group) => group.id === id) || null;
+}
+
+function renderGroupNameList(data) {
+  const list = $('#groupNameList');
+  if (!list) return;
+  list.innerHTML = (data.groups || []).map((group) => `<option value="${escapeHtml(group.name)}"></option>`).join('');
+}
+
+function fillSubscriptionForm(group) {
+  const nameInput = $('#subscriptionGroupName');
+  const urlInput = $('#subscriptionUrl');
+  const intervalInput = $('#subscriptionIntervalMin');
+  if (nameInput) nameInput.value = group?.name || '';
+  if (urlInput) urlInput.value = group?.subscriptionUrl || '';
+  if (intervalInput) intervalInput.value = group?.subscriptionUpdateIntervalMin || 60;
+  nameInput?.focus?.();
+  nameInput?.select?.();
+}
+
+function renderFirewall(data) {
+  const firewall = data.firewall || {};
+  const status = $('#firewallStatus');
+  if (status) status.textContent = firewall.available ? '可用' : `不可用${firewall.error ? `：${firewall.error}` : ''}`;
+  const source = $('#firewallSource');
+  if (source && !source.value) source.value = '172.22.0.0/16';
+  const httpPort = $('#firewallHttpPort');
+  if (httpPort) httpPort.textContent = data.settings.httpPort || '--';
+  const socksPort = $('#firewallSocksPort');
+  if (socksPort) socksPort.textContent = data.settings.socksPort || '--';
+  const rules = $('#firewallRules');
+  if (!rules) return;
+  if (!firewall.available) {
+    rules.innerHTML = `<div class="muted">${escapeHtml(firewall.error || 'iptables 不可用')}</div>`;
+    return;
+  }
+  if (!firewall.rules.length) {
+    rules.innerHTML = '<div class="muted">暂无放行规则</div>';
+    return;
+  }
+  rules.innerHTML = firewall.rules.map((rule) => `<div class="firewall-rule"><code>${escapeHtml(rule)}</code></div>`).join('');
+}
+
 function pruneSelectedNodes(data) {
   const validIds = new Set((data?.nodes || []).map((node) => node.id));
   for (const id of Array.from(state.selectedNodeIds)) {
@@ -243,9 +287,12 @@ function renderGroups(data) {
   const wrap = $('#groupsList');
   if (!data.groups.length) {
     wrap.innerHTML = '<div class="muted">暂无分组。导入节点时填分组名后会自动同步。</div>';
+    const list = $('#groupNameList');
+    if (list) list.innerHTML = '';
     return;
   }
 
+  renderGroupNameList(data);
   wrap.innerHTML = data.groups.map((group) => {
     const nodes = groupNodes(group);
     const usable = nodes.filter(usableNode);
@@ -255,6 +302,15 @@ function renderGroups(data) {
       const label = `${node.name}${usableNode(node) ? '' : '（不可用）'}`;
       return `<option value="${escapeHtml(node.id)}"${node.id === group.selectedNodeId ? ' selected' : ''}${disabled}>${escapeHtml(label)}</option>`;
     }).join('');
+    const subscriptionUrl = group.subscriptionUrl || '';
+    const subscriptionSummary = subscriptionUrl
+      ? `
+          <div class="group-subscription">
+            <div class="node-meta group-subscription-url" title="${escapeHtml(subscriptionUrl)}">${escapeHtml(subscriptionUrl)}</div>
+            <div class="node-meta">间隔：${group.subscriptionUpdateIntervalMin || 60} 分钟 · 上次：${formatTime(group.subscriptionLastSyncAt)} · 数量：${group.subscriptionLastCount || 0}</div>
+            ${group.subscriptionLastError ? `<div class="node-meta node-error" title="${escapeHtml(group.subscriptionLastError)}">错误：${escapeHtml(group.subscriptionLastError)}</div>` : ''}
+          </div>`
+      : '<div class="node-meta">未配置订阅</div>';
     return `
       <article class="group-item">
         <div>
@@ -264,9 +320,12 @@ function renderGroups(data) {
             <span class="pill">${usable.length}/${nodes.length}</span>
           </div>
           <div class="node-meta">当前：${escapeHtml(selected?.name || '--')}</div>
+          ${subscriptionSummary}
         </div>
         <div class="group-actions">
           <select data-group-select="${escapeHtml(group.id)}">${options || '<option value="">无节点</option>'}</select>
+          <button data-group-subscription-edit="${escapeHtml(group.id)}" type="button">${group.subscriptionUrl ? '编辑订阅' : '设置订阅'}</button>
+          ${group.subscriptionUrl ? `<button data-group-subscription-sync="${escapeHtml(group.id)}" type="button">同步订阅</button>` : ''}
           <button data-group-active="${escapeHtml(group.id)}" type="button">设为活动</button>
           <button data-group-test="${escapeHtml(group.id)}" type="button">测速</button>
           <button data-group-delete="${escapeHtml(group.id)}" type="button">删除</button>
@@ -291,7 +350,9 @@ function renderNodes(data) {
     updateBulkSelectionUi(data);
     return;
   }
-  body.innerHTML = data.nodes.map((node) => `
+  body.innerHTML = data.nodes.map((node) => {
+    const errorText = node.error || '';
+    return `
     <tr class="${state.selectedNodeIds.has(node.id) ? 'selected-row' : ''}">
       <td class="check-cell"><input class="node-check" type="checkbox" data-node-select="${escapeHtml(node.id)}"${state.selectedNodeIds.has(node.id) ? ' checked' : ''}></td>
       <td>
@@ -300,8 +361,8 @@ function renderNodes(data) {
       </td>
       <td>${escapeHtml(node.group || '--')}</td>
       <td>
-        <div>${escapeHtml(node.server)}:${escapeHtml(node.port)}</div>
-        <div class="node-meta">${escapeHtml(node.error || '')}</div>
+        <div class="node-address">${escapeHtml(node.server)}:${escapeHtml(node.port)}</div>
+        <div class="node-meta node-error" title="${escapeHtml(errorText)}">${escapeHtml(errorText)}</div>
       </td>
       <td>${nodeBadge(node)}</td>
       <td>${node.latencyMs == null ? '--' : `${escapeHtml(node.latencyMs)} ms`}</td>
@@ -313,7 +374,8 @@ function renderNodes(data) {
           <button data-node-delete="${escapeHtml(node.id)}" type="button">删除</button>
         </div>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
   updateBulkSelectionUi(data);
 }
 
@@ -325,6 +387,7 @@ function renderSettings(data) {
   $('#settingHttpPort').value = data.settings.httpPort || '';
   $('#settingSocksPort').value = data.settings.socksPort || '';
   $('#coreListenInfo').textContent = `${data.settings.proxyListenHost}:${data.settings.httpPort} / SOCKS ${data.settings.socksPort}`;
+  renderFirewall(data);
 }
 
 async function runAction(fn, success) {
@@ -454,6 +517,30 @@ $('#groupTestIntervalForm').addEventListener('submit', (event) => {
   }, '自动测速间隔已保存');
 });
 
+$('#subscriptionForm').addEventListener('submit', (event) => {
+  event.preventDefault();
+  runAction(async () => {
+    const groupName = $('#subscriptionGroupName').value.trim();
+    const subscriptionUrl = $('#subscriptionUrl').value.trim();
+    const interval = Math.max(1, Number($('#subscriptionIntervalMin').value || 60));
+    if (!groupName) throw new Error('请输入分组名称');
+    if (!subscriptionUrl) throw new Error('请输入订阅链接');
+    const payload = await request('/api/groups/subscription', {
+      method: 'POST',
+      body: JSON.stringify({
+        groupName,
+        subscriptionUrl,
+        subscriptionUpdateIntervalMin: interval
+      })
+    });
+    if (payload.syncError) {
+      toast(`订阅已保存，但同步失败：${payload.syncError}`);
+      return;
+    }
+    toast(`订阅已同步 ${payload.syncedCount || 0} 个节点`);
+  });
+});
+
 $('#importForm').addEventListener('submit', (event) => {
   event.preventDefault();
   runAction(async () => {
@@ -555,9 +642,13 @@ document.addEventListener('click', (event) => {
   const nodeToggle = target.dataset.nodeToggle;
   const nodeDelete = target.dataset.nodeDelete;
   const nodeGroup = target.dataset.nodeGroup;
+  const groupSubscriptionEdit = target.dataset.groupSubscriptionEdit;
+  const groupSubscriptionSync = target.dataset.groupSubscriptionSync;
   const groupActive = target.dataset.groupActive;
   const groupTest = target.dataset.groupTest;
   const groupDelete = target.dataset.groupDelete;
+  const firewallAction = target.dataset.firewallAction;
+  const firewallPort = target.dataset.firewallPort;
 
   if (nodeTest) {
     runAction(() => request('/api/test', { method: 'POST', body: JSON.stringify({ ids: [nodeTest] }) }), '测速完成');
@@ -578,6 +669,16 @@ document.addEventListener('click', (event) => {
       method: 'PUT',
       body: JSON.stringify({ group })
     }), '分组已更新');
+  } else if (groupSubscriptionEdit) {
+    const group = getGroupById(groupSubscriptionEdit);
+    if (!group) return;
+    fillSubscriptionForm(group);
+    setView('groups');
+  } else if (groupSubscriptionSync) {
+    runAction(() => request(`/api/groups/${encodeURIComponent(groupSubscriptionSync)}/subscription-sync`, {
+      method: 'POST',
+      body: '{}'
+    }), '订阅已同步');
   } else if (groupActive) {
     runAction(() => request(`/api/groups/${encodeURIComponent(groupActive)}`, {
       method: 'PUT',
@@ -588,6 +689,17 @@ document.addEventListener('click', (event) => {
   } else if (groupDelete) {
     if (!confirm('删除这个分组？该分组下的节点也会一起删除。')) return;
     runAction(() => request(`/api/groups/${encodeURIComponent(groupDelete)}`, { method: 'DELETE' }), '分组已删除');
+  } else if (firewallAction) {
+    runAction(() => request('/api/firewall', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: firewallAction,
+        source: $('#firewallSource').value.trim(),
+        port: firewallPort === 'socks'
+          ? Number(state.data?.settings?.socksPort || 0)
+          : Number(state.data?.settings?.httpPort || 0)
+      })
+    }), firewallAction === 'delete' ? '规则已删除' : '规则已开放');
   }
 });
 

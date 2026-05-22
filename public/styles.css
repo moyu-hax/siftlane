@@ -303,6 +303,22 @@ label span {
   background: var(--surface-soft);
 }
 
+.subscription-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr) minmax(180px, 240px) auto;
+  gap: 8px;
+  align-items: end;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.subscription-form .wide {
+  grid-column: span 2;
+}
+
 .interval-form label {
   margin: 0;
 }
@@ -396,6 +412,28 @@ label span {
   width: auto;
 }
 
+.group-subscription {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.group-subscription-url,
+.node-address,
+.node-error {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.button-pair {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .bulk-toolbar {
   display: flex;
   align-items: center;
@@ -438,6 +476,7 @@ table {
   width: 100%;
   min-width: 780px;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
 th,
@@ -463,8 +502,64 @@ th {
   font-size: 12px;
 }
 
+.node-address,
+.node-error {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .logs-panel {
   margin-top: 0;
+}
+
+.firewall-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.firewall-port-grid {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  gap: 10px 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.firewall-port-grid span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.firewall-port-grid strong {
+  display: block;
+  font-size: 18px;
+}
+
+.firewall-rules {
+  display: grid;
+  gap: 8px;
+}
+
+.firewall-rule {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.firewall-rule code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 pre {
@@ -567,6 +662,18 @@ pre {
   }
 
   .interval-form {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-form {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-form .wide {
+    grid-column: auto;
+  }
+
+  .firewall-port-grid {
     grid-template-columns: 1fr;
   }
 
