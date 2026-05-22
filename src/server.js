@@ -21,6 +21,8 @@ const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const TEST_TICK_MS = 10 * 1000;
 const TEST_TIMEOUT_MS = 10 * 1000;
 const MAX_LOG_LINES = 200;
+const DEFAULT_GROUP_NAME = '默认分组';
+const DEFAULT_SUBSCRIPTION_CONVERTER_URL = 'https://clawsub.7979.pp.ua/';
 
 const sessions = new Map();
 const core = {
@@ -49,6 +51,10 @@ function normalizeString(value) {
   return String(value || '').trim();
 }
 
+function normalizeGroupName(value) {
+  return normalizeString(value) || DEFAULT_GROUP_NAME;
+}
+
 function stripAnsi(value) {
   return String(value || '').replace(/\u001b\[[0-9;]*m/g, '');
 }
@@ -72,6 +78,7 @@ function defaultState() {
       activeGroupId: null,
       lastSwitchAt: null,
       lastTestAt: null,
+      subscriptionConverterUrl: DEFAULT_SUBSCRIPTION_CONVERTER_URL,
       passwordHash: null
     },
     nodes: [],
@@ -136,6 +143,9 @@ function normalizeState(input) {
   next.settings.passwordHash = normalizeString(next.settings.passwordHash) || null;
   next.settings.lastSwitchAt = normalizeIso(next.settings.lastSwitchAt);
   next.settings.lastTestAt = normalizeIso(next.settings.lastTestAt);
+  next.settings.subscriptionConverterUrl = typeof next.settings.subscriptionConverterUrl === 'string'
+    ? normalizeString(next.settings.subscriptionConverterUrl)
+    : DEFAULT_SUBSCRIPTION_CONVERTER_URL;
 
   syncGroups(next);
   if (next.settings.manualNodeId && !next.nodes.some((node) => node.id === next.settings.manualNodeId)) {
@@ -165,7 +175,7 @@ function normalizeNode(node) {
     type,
     server,
     port,
-    group: normalizeString(node.group),
+    group: normalizeGroupName(node.group),
     enabled: node.enabled !== false,
     autoDisabled: Boolean(node.autoDisabled),
     status: ['up', 'down', 'unknown'].includes(node.status) ? node.status : 'unknown',
@@ -190,26 +200,97 @@ function normalizeNode(node) {
     fingerprint: normalizeString(node.fingerprint || node.fp),
     sourceType: normalizeString(node.sourceType) || 'manual',
     sourceGroupId: normalizeString(node.sourceGroupId) || null,
+    sourceSubscriptionId: normalizeString(node.sourceSubscriptionId || node.subscriptionId) || null,
     sourceUrl: normalizeString(node.sourceUrl) || null,
     sourceKey: normalizeString(node.sourceKey) || null
   };
 }
 
+function inferSubscriptionName(url) {
+  const text = normalizeString(url);
+  if (!text) return '订阅';
+  try {
+    const parsed = new URL(text);
+    return parsed.hostname || '订阅';
+  } catch {
+    return text.length > 32 ? text.slice(0, 32) + '...' : text;
+  }
+}
+
+function normalizeSubscription(subscription, fallback = {}) {
+  const source = subscription && typeof subscription === 'object' ? subscription : {};
+  const url = normalizeString(source.url || source.subscriptionUrl || fallback.url);
+  if (!url) return null;
+  return {
+    id: normalizeString(source.id || fallback.id) || createId('sub_'),
+    name: normalizeString(source.name || fallback.name) || inferSubscriptionName(url),
+    url,
+    enabled: source.enabled !== false,
+    lastSyncAt: normalizeIso(source.lastSyncAt || source.subscriptionLastSyncAt || fallback.lastSyncAt),
+    lastError: normalizeString(source.lastError || source.subscriptionLastError || fallback.lastError) || null,
+    lastCount: Math.max(0, toInt(source.lastCount ?? source.subscriptionLastCount ?? fallback.lastCount, 0))
+  };
+}
+
+function latestSubscriptionSyncAt(subscriptions) {
+  let latest = 0;
+  for (const subscription of subscriptions || []) {
+    const ms = Date.parse(subscription.lastSyncAt || '');
+    if (Number.isFinite(ms) && ms > latest) latest = ms;
+  }
+  return latest ? new Date(latest).toISOString() : null;
+}
+
+function normalizeGroupSubscriptions(group) {
+  const subscriptions = [];
+  const seen = new Set();
+  const add = (subscription, fallback = {}) => {
+    const item = normalizeSubscription(subscription, fallback);
+    if (!item || seen.has(item.id) || seen.has(item.url)) return;
+    seen.add(item.id);
+    seen.add(item.url);
+    subscriptions.push(item);
+  };
+
+  if (Array.isArray(group.subscriptions)) {
+    for (const subscription of group.subscriptions) add(subscription);
+  }
+
+  const legacyUrl = normalizeString(group.subscriptionUrl);
+  if (legacyUrl && !seen.has(legacyUrl)) {
+    add({
+      url: legacyUrl,
+      name: normalizeString(group.subscriptionName) || inferSubscriptionName(legacyUrl),
+      lastSyncAt: group.subscriptionLastSyncAt,
+      lastError: group.subscriptionLastError,
+      lastCount: group.subscriptionLastCount
+    });
+  }
+
+  return subscriptions;
+}
+
 function normalizeGroup(group) {
   if (!group || typeof group !== 'object') return null;
   const id = normalizeString(group.id) || createId('group_');
-  const name = normalizeString(group.name);
+  const name = normalizeGroupName(group.name);
   if (!id || !name) return null;
+  const subscriptions = normalizeGroupSubscriptions(group);
+  const subscriptionLastCount = subscriptions.length
+    ? subscriptions.reduce((sum, subscription) => sum + Math.max(0, toInt(subscription.lastCount, 0)), 0)
+    : Math.max(0, toInt(group.subscriptionLastCount, 0));
+  const subscriptionError = subscriptions.find((subscription) => subscription.lastError)?.lastError || normalizeString(group.subscriptionLastError) || null;
   return {
     id,
     name,
     nodeIds: Array.isArray(group.nodeIds) ? [...new Set(group.nodeIds.map(normalizeString).filter(Boolean))] : [],
     selectedNodeId: normalizeString(group.selectedNodeId) || null,
-    subscriptionUrl: normalizeString(group.subscriptionUrl),
-    subscriptionUpdateIntervalMin: normalizeString(group.subscriptionUrl) ? Math.min(10080, Math.max(1, toInt(group.subscriptionUpdateIntervalMin, 60))) : 0,
-    subscriptionLastSyncAt: normalizeIso(group.subscriptionLastSyncAt),
-    subscriptionLastError: normalizeString(group.subscriptionLastError) || null,
-    subscriptionLastCount: Math.max(0, toInt(group.subscriptionLastCount, 0))
+    subscriptionUrl: subscriptions[0]?.url || '',
+    subscriptionUpdateIntervalMin: normalizeSubscriptionUpdateInterval(group.subscriptionUpdateIntervalMin || group.intervalMin || 60),
+    subscriptionLastSyncAt: normalizeIso(group.subscriptionLastSyncAt) || latestSubscriptionSyncAt(subscriptions),
+    subscriptionLastError: subscriptionError,
+    subscriptionLastCount,
+    subscriptions
   };
 }
 
@@ -220,8 +301,8 @@ function syncGroups(targetState = state) {
   const seenNames = new Set();
 
   for (const node of targetState.nodes) {
-    const groupName = normalizeString(node.group);
-    if (!groupName || seenNames.has(groupName)) continue;
+    const groupName = normalizeGroupName(node.group);
+    if (seenNames.has(groupName)) continue;
     seenNames.add(groupName);
     const existing = existingByName.get(groupName);
     const ids = targetState.nodes.filter((item) => item.group === groupName).map((item) => item.id);
@@ -232,6 +313,18 @@ function syncGroups(targetState = state) {
       nodeIds: ids,
       selectedNodeId: ids.includes(existing?.selectedNodeId) ? existing.selectedNodeId : (ids[0] || null)
     });
+  }
+
+  if (!seenNames.has(DEFAULT_GROUP_NAME)) {
+    const existing = existingByName.get(DEFAULT_GROUP_NAME);
+    groups.push({
+      ...(existing || {}),
+      id: existing?.id || createId('group_'),
+      name: DEFAULT_GROUP_NAME,
+      nodeIds: [],
+      selectedNodeId: null
+    });
+    seenNames.add(DEFAULT_GROUP_NAME);
   }
 
   for (const group of targetState.groups || []) {
@@ -1048,41 +1141,150 @@ function normalizeSubscriptionUpdateInterval(value) {
   return Math.min(10080, Math.max(1, toInt(value, 60)));
 }
 
+function buildSubscriptionConverterUrl(converterUrl, sourceUrl) {
+  const base = normalizeString(converterUrl);
+  if (!base) return '';
+  const endpoint = new URL(base);
+  if (!endpoint.pathname || endpoint.pathname === '/') {
+    endpoint.pathname = '/sub';
+  } else if (endpoint.pathname.endsWith('/')) {
+    endpoint.pathname += 'sub';
+  }
+  endpoint.searchParams.set('target', 'singbox');
+  endpoint.searchParams.set('url', sourceUrl);
+  return endpoint.toString();
+}
+
+function subscriptionFetchCandidates(sourceUrl) {
+  const directUrl = normalizeString(sourceUrl);
+  const candidates = [];
+  const seen = new Set();
+  const add = (label, url) => {
+    const text = normalizeString(url);
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    candidates.push({ label, url: text });
+  };
+
+  const converterUrl = normalizeString(state.settings.subscriptionConverterUrl);
+  if (converterUrl) {
+    try {
+      add('订阅转换', buildSubscriptionConverterUrl(converterUrl, directUrl));
+    } catch (error) {
+      appendCoreLog('订阅转换地址无效：' + error.message);
+    }
+  }
+  add('原始订阅', directUrl);
+  return candidates;
+}
+
+function findGroupSubscription(group, subscriptionId) {
+  const id = normalizeString(subscriptionId);
+  return (group?.subscriptions || []).find((subscription) => subscription.id === id) || null;
+}
+
+function matchesSubscriptionNode(node, group, subscription) {
+  if (!node || node.sourceType !== 'subscription' || node.sourceGroupId !== group.id) return false;
+  if (node.sourceSubscriptionId === subscription.id) return true;
+  if (!node.sourceSubscriptionId && normalizeString(node.sourceUrl) === subscription.url) return true;
+  return !node.sourceSubscriptionId && (group.subscriptions || []).length <= 1;
+}
+
+function syncGroupSubscriptionSummary(group) {
+  const subscriptions = group.subscriptions || [];
+  group.subscriptionUrl = subscriptions[0]?.url || '';
+  group.subscriptionLastCount = subscriptions.reduce((sum, subscription) => sum + Math.max(0, toInt(subscription.lastCount, 0)), 0);
+  const failed = subscriptions.find((subscription) => subscription.lastError);
+  group.subscriptionLastError = failed ? failed.name + ': ' + failed.lastError : null;
+}
+
+async function importSubscriptionNodes(group, subscription) {
+  const candidates = subscriptionFetchCandidates(subscription.url);
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      const raw = await fetchRemoteText(candidate.url);
+      const decoded = normalizeSubscriptionContent(raw);
+      const imported = importNodes(decoded, group.name, {
+        sourceType: 'subscription',
+        sourceGroupId: group.id,
+        sourceSubscriptionId: subscription.id,
+        sourceUrl: subscription.url,
+        sourceKey: subscription.id
+      });
+      if (imported.length) return imported;
+      lastError = candidate.label + '没有可用节点';
+    } catch (error) {
+      lastError = candidate.label + '失败：' + error.message;
+    }
+  }
+  throw new Error(lastError || '订阅里没有可用节点');
+}
+
+async function refreshGroupSubscription(group, subscription, { force = false } = {}) {
+  const targetGroup = getGroupById(group?.id) || group;
+  if (!targetGroup) throw new Error('分组未找到');
+  const targetSubscription = findGroupSubscription(targetGroup, subscription?.id) || subscription;
+  if (!targetSubscription || !normalizeString(targetSubscription.url)) throw new Error('订阅未找到');
+  if (targetSubscription.enabled === false && !force) {
+    return { changed: false, skipped: true, importedCount: targetSubscription.lastCount || 0 };
+  }
+
+  const imported = await importSubscriptionNodes(targetGroup, targetSubscription);
+  if (!imported.length) throw new Error('订阅里没有可用节点');
+
+  state.nodes = state.nodes.filter((node) => !matchesSubscriptionNode(node, targetGroup, targetSubscription));
+  state.nodes.push(...imported);
+  targetGroup.subscriptionLastSyncAt = new Date().toISOString();
+  targetSubscription.lastSyncAt = new Date().toISOString();
+  targetSubscription.lastError = null;
+  targetSubscription.lastCount = imported.length;
+  syncGroupSubscriptionSummary(targetGroup);
+  syncGroups(state);
+  return { changed: true, importedCount: imported.length };
+}
+
 async function refreshSubscriptionGroup(group, { force = false } = {}) {
   const targetGroup = getGroupById(group?.id) || group;
   if (!targetGroup) throw new Error('分组未找到');
-  const subscriptionUrl = normalizeString(targetGroup.subscriptionUrl);
-  if (!subscriptionUrl) throw new Error('请先填写订阅链接');
+  const subscriptions = (targetGroup.subscriptions || []).filter((subscription) => subscription.enabled !== false && normalizeString(subscription.url));
+  if (!subscriptions.length) throw new Error('该分组还没有订阅链接');
 
   const intervalMs = normalizeSubscriptionUpdateInterval(targetGroup.subscriptionUpdateIntervalMin) * 60 * 1000;
   if (!force && targetGroup.subscriptionLastSyncAt) {
     const last = Date.parse(targetGroup.subscriptionLastSyncAt);
     if (Number.isFinite(last) && Date.now() - last < intervalMs) {
-      return { changed: false, skipped: true, importedCount: targetGroup.subscriptionLastCount || 0 };
+      return { changed: false, skipped: true, importedCount: targetGroup.subscriptionLastCount || 0, errors: [] };
     }
   }
 
-  const raw = await fetchRemoteText(subscriptionUrl);
-  const decoded = normalizeSubscriptionContent(raw);
-  const imported = importNodes(decoded, targetGroup.name, {
-    sourceType: 'subscription',
-    sourceGroupId: targetGroup.id,
-    sourceUrl: subscriptionUrl
-  });
-  if (!imported.length) throw new Error('订阅里没有可用节点');
+  let changed = false;
+  let importedCount = 0;
+  const errors = [];
+  for (const subscription of subscriptions) {
+    try {
+      const result = await refreshGroupSubscription(targetGroup, subscription, { force: true });
+      importedCount += result.importedCount || 0;
+      changed = changed || Boolean(result.changed);
+    } catch (error) {
+      subscription.lastError = error.message;
+      subscription.lastSyncAt = new Date().toISOString();
+      errors.push(subscription.name + ': ' + error.message);
+      appendCoreLog('订阅更新失败：' + targetGroup.name + ' / ' + subscription.name + ' - ' + error.message);
+    }
+  }
 
-  state.nodes = state.nodes.filter((node) => node.sourceType !== 'subscription' || node.sourceGroupId !== targetGroup.id);
-  state.nodes.push(...imported);
   targetGroup.subscriptionLastSyncAt = new Date().toISOString();
-  targetGroup.subscriptionLastError = null;
-  targetGroup.subscriptionLastCount = imported.length;
-  syncGroups(state);
-  return { changed: true, importedCount: imported.length };
+  syncGroupSubscriptionSummary(targetGroup);
+  if (errors.length && !changed) {
+    throw new Error(errors.join('；'));
+  }
+  return { changed, importedCount: importedCount || targetGroup.subscriptionLastCount || 0, errors };
 }
 
 async function runGroupSubscriptionSyncIfDue() {
   if (testing || syncingSubscriptions || !state.groups.length) return false;
-  const dueGroups = state.groups.filter((group) => group.subscriptionUrl && normalizeSubscriptionUpdateInterval(group.subscriptionUpdateIntervalMin) > 0)
+  const dueGroups = state.groups.filter((group) => (group.subscriptions || []).some((subscription) => subscription.enabled !== false && subscription.url))
     .filter((group) => {
       const last = group.subscriptionLastSyncAt ? Date.parse(group.subscriptionLastSyncAt) : 0;
       return !Number.isFinite(last) || Date.now() - last >= normalizeSubscriptionUpdateInterval(group.subscriptionUpdateIntervalMin) * 60 * 1000;
@@ -1101,7 +1303,7 @@ async function runGroupSubscriptionSyncIfDue() {
       } catch (error) {
         group.subscriptionLastError = error.message;
         group.subscriptionLastSyncAt = new Date().toISOString();
-        appendCoreLog(`订阅更新失败：${group.name} - ${error.message}`);
+        appendCoreLog('订阅更新失败：' + group.name + ' - ' + error.message);
       }
     }
     saveState();
@@ -1119,9 +1321,12 @@ function importNodes(text, groupName = '', options = {}) {
   const raw = normalizeString(text);
   if (!raw) return [];
   const imported = [];
+  const targetGroupName = normalizeGroupName(groupName);
   const sourceType = normalizeString(options.sourceType) || 'manual';
   const sourceGroupId = normalizeString(options.sourceGroupId) || null;
+  const sourceSubscriptionId = normalizeString(options.sourceSubscriptionId || options.subscriptionId) || null;
   const sourceUrl = normalizeString(options.sourceUrl) || null;
+  const sourceKey = normalizeString(options.sourceKey) || sourceSubscriptionId;
 
   try {
     const parsed = JSON.parse(raw);
@@ -1132,10 +1337,12 @@ function importNodes(text, groupName = '', options = {}) {
         id: createId('node_'),
         name: item.name || item.tag || item.server,
         port: item.port || item.server_port,
-        group: groupName || item.group || item.tag || '',
+        group: targetGroupName,
         sourceType,
         sourceGroupId,
-        sourceUrl
+        sourceSubscriptionId,
+        sourceUrl,
+        sourceKey
       });
       if (node) imported.push(node);
     }
@@ -1145,9 +1352,9 @@ function importNodes(text, groupName = '', options = {}) {
   }
 
   for (const line of raw.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)) {
-    const node = parseProxyLink(line, groupName);
+    const node = parseProxyLink(line, targetGroupName);
     if (node) {
-      imported.push(normalizeNode({ ...node, sourceType, sourceGroupId, sourceUrl }));
+      imported.push(normalizeNode({ ...node, sourceType, sourceGroupId, sourceSubscriptionId, sourceUrl, sourceKey }));
     }
   }
   return imported;
@@ -1384,7 +1591,10 @@ async function handleApi(req, res, pathname) {
       switchMode: ['manual', 'auto'].includes(body.switchMode) ? body.switchMode : state.settings.switchMode,
       manualNodeId: body.manualNodeId === undefined ? state.settings.manualNodeId : (normalizeString(body.manualNodeId) || null),
       autoSwitchIntervalMin: body.autoSwitchIntervalMin == null ? state.settings.autoSwitchIntervalMin : toInt(body.autoSwitchIntervalMin, state.settings.autoSwitchIntervalMin),
-      activeGroupId: normalizeString(body.activeGroupId) || state.settings.activeGroupId
+      activeGroupId: normalizeString(body.activeGroupId) || state.settings.activeGroupId,
+      subscriptionConverterUrl: body.subscriptionConverterUrl === undefined
+        ? state.settings.subscriptionConverterUrl
+        : normalizeString(body.subscriptionConverterUrl)
     };
     if (body.switchMode === 'auto' || body.activeGroupId !== undefined || body.autoSwitchIntervalMin != null) {
       state.settings.lastSwitchAt = new Date().toISOString();
@@ -1401,7 +1611,7 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/nodes/import' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    const imported = importNodes(body.text || '', body.group || '');
+    const imported = importNodes(body.text || '', normalizeGroupName(body.group));
     state.nodes.push(...imported);
     syncGroups(state);
     saveState();
@@ -1483,43 +1693,82 @@ async function handleApi(req, res, pathname) {
 
   if (pathname === '/api/groups/subscription' && req.method === 'POST') {
     const body = await readJsonBody(req);
-    const groupId = normalizeString(body.groupId);
+    const groupId = normalizeString(body.groupId || body.group || body.id);
     const groupName = normalizeString(body.groupName || body.group || body.name);
+    const subscriptionId = normalizeString(body.subscriptionId);
+    const subscriptionName = normalizeString(body.subscriptionName || body.subscriptionTitle || body.title);
     const subscriptionUrl = normalizeString(body.subscriptionUrl || body.url);
     let group = groupId ? state.groups.find((item) => item.id === groupId) : null;
-    if (!group) {
-      if (!groupName) throw new Error('????????');
-      if (!subscriptionUrl) throw new Error('????????');
+    if (!group && groupName) {
       group = state.groups.find((item) => item.name === groupName);
-      if (!group) {
-        group = { id: createId('group_'), name: groupName, nodeIds: [], selectedNodeId: null };
-        state.groups.push(group);
-      }
-    } else if (!subscriptionUrl) {
-      throw new Error('????????');
+    }
+    if (!group) {
+      if (!groupName) throw new Error('分组名称不能为空');
+      if (!subscriptionUrl) throw new Error('订阅链接不能为空');
+      group = {
+        id: createId('group_'),
+        name: groupName,
+        nodeIds: [],
+        selectedNodeId: null,
+        subscriptions: []
+      };
+      state.groups.push(group);
     }
 
-    const subscriptionUpdateIntervalMin = normalizeSubscriptionUpdateInterval(body.subscriptionUpdateIntervalMin || body.intervalMin);
-    group.subscriptionUrl = subscriptionUrl;
-    group.subscriptionUpdateIntervalMin = subscriptionUpdateIntervalMin;
-    group.subscriptionLastError = null;
+    if (!group.subscriptions) group.subscriptions = [];
+    group.subscriptionUpdateIntervalMin = normalizeSubscriptionUpdateInterval(body.subscriptionUpdateIntervalMin || body.intervalMin || group.subscriptionUpdateIntervalMin || 60);
+
+    const existingSubscription = subscriptionId
+      ? findGroupSubscription(group, subscriptionId)
+      : (group.subscriptions || []).find((item) => item.url === subscriptionUrl) || null;
+    if (subscriptionId && !existingSubscription) throw new Error('订阅未找到');
+    if (!subscriptionUrl && !existingSubscription) throw new Error('订阅链接不能为空');
+
+    const nextSubscription = normalizeSubscription({
+      ...(existingSubscription || {}),
+      id: existingSubscription?.id || createId('sub_'),
+      name: subscriptionName || existingSubscription?.name,
+      url: subscriptionUrl || existingSubscription?.url,
+      enabled: existingSubscription?.enabled !== false,
+      lastSyncAt: existingSubscription?.lastSyncAt,
+      lastError: existingSubscription?.lastError,
+      lastCount: existingSubscription?.lastCount
+    });
+    if (!nextSubscription) throw new Error('订阅链接不能为空');
+
+    if (existingSubscription) {
+      existingSubscription.name = nextSubscription.name;
+      existingSubscription.url = nextSubscription.url;
+      existingSubscription.enabled = nextSubscription.enabled;
+    } else {
+      group.subscriptions.push(nextSubscription);
+    }
 
     let syncError = null;
     let syncedCount = 0;
     const before = runtimeSignature();
     try {
-      const result = await refreshSubscriptionGroup(group, { force: true });
+      const result = await refreshGroupSubscription(group, nextSubscription, { force: true });
       syncedCount = result.importedCount || 0;
     } catch (error) {
       syncError = error.message;
-      group.subscriptionLastError = syncError;
+      nextSubscription.lastError = syncError;
+      nextSubscription.lastSyncAt = new Date().toISOString();
       group.subscriptionLastSyncAt = new Date().toISOString();
+      syncGroupSubscriptionSummary(group);
     }
 
     applyGroupSelections();
     saveState();
     if (core.process && !syncError && before !== runtimeSignature()) await restartCore();
-    sendJson(res, 200, { ok: true, syncedCount, syncError, ...publicState() });
+    sendJson(res, 200, {
+      ok: true,
+      groupId: group.id,
+      subscriptionId: nextSubscription.id,
+      syncedCount,
+      syncError,
+      ...publicState()
+    });
     return;
   }
 
@@ -1527,14 +1776,48 @@ async function handleApi(req, res, pathname) {
   if (groupSubscriptionSyncMatch && req.method === 'POST') {
     const group = state.groups.find((item) => item.id === groupSubscriptionSyncMatch[1]);
     if (!group) throw new Error('分组未找到');
-    if (!group.subscriptionUrl) throw new Error('该分组还没有订阅链接');
+    if (!(group.subscriptions || []).length) throw new Error('该分组还没有订阅链接');
 
     const before = runtimeSignature();
     const result = await refreshSubscriptionGroup(group, { force: true });
     applyGroupSelections();
     saveState();
     if (core.process && before !== runtimeSignature()) await restartCore();
+    sendJson(res, 200, { ok: true, syncedCount: result.importedCount || 0, syncError: result.errors?.join('；') || null, ...publicState() });
+    return;
+  }
+
+  const groupSubscriptionItemSyncMatch = pathname.match(/^\/api\/groups\/([^/]+)\/subscriptions\/([^/]+)\/sync$/);
+  if (groupSubscriptionItemSyncMatch && req.method === 'POST') {
+    const group = state.groups.find((item) => item.id === groupSubscriptionItemSyncMatch[1]);
+    if (!group) throw new Error('分组未找到');
+    const subscription = findGroupSubscription(group, groupSubscriptionItemSyncMatch[2]);
+    if (!subscription) throw new Error('订阅未找到');
+
+    const before = runtimeSignature();
+    const result = await refreshGroupSubscription(group, subscription, { force: true });
+    applyGroupSelections();
+    saveState();
+    if (core.process && before !== runtimeSignature()) await restartCore();
     sendJson(res, 200, { ok: true, syncedCount: result.importedCount || 0, ...publicState() });
+    return;
+  }
+
+  const groupSubscriptionItemMatch = pathname.match(/^\/api\/groups\/([^/]+)\/subscriptions\/([^/]+)$/);
+  if (groupSubscriptionItemMatch && req.method === 'DELETE') {
+    const group = state.groups.find((item) => item.id === groupSubscriptionItemMatch[1]);
+    if (!group) throw new Error('分组未找到');
+    const subscription = findGroupSubscription(group, groupSubscriptionItemMatch[2]);
+    if (!subscription) throw new Error('订阅未找到');
+
+    const before = runtimeSignature();
+    state.nodes = state.nodes.filter((node) => !matchesSubscriptionNode(node, group, subscription));
+    group.subscriptions = (group.subscriptions || []).filter((item) => item.id !== subscription.id);
+    syncGroupSubscriptionSummary(group);
+    applyGroupSelections();
+    saveState();
+    if (core.process && before !== runtimeSignature()) await restartCore();
+    sendJson(res, 200, { ok: true, ...publicState() });
     return;
   }
 

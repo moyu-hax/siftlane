@@ -1,11 +1,13 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+const DEFAULT_GROUP_NAME = '默认分组';
 
 const state = {
   data: null,
   setupRequired: false,
   view: 'dashboard',
-  selectedNodeIds: new Set()
+  selectedNodeIds: new Set(),
+  nodeGroupFilter: ''
 };
 
 async function request(path, options = {}) {
@@ -80,6 +82,47 @@ function groupNodes(group) {
   return (state.data?.nodes || []).filter((node) => ids.has(node.id));
 }
 
+function nodeGroupName(node) {
+  return String(node?.group || '').trim() || DEFAULT_GROUP_NAME;
+}
+
+function groupSubscriptions(group) {
+  if (Array.isArray(group?.subscriptions) && group.subscriptions.length) return group.subscriptions;
+  const legacyUrl = String(group?.subscriptionUrl || '').trim();
+  if (!legacyUrl) return [];
+  return [{
+    id: 'legacy-subscription',
+    name: String(group?.subscriptionName || '').trim() || legacyUrl,
+    url: legacyUrl,
+    enabled: true,
+    lastSyncAt: group?.subscriptionLastSyncAt || null,
+    lastError: group?.subscriptionLastError || null,
+    lastCount: group?.subscriptionLastCount || 0
+  }];
+}
+
+function getSubscriptionById(group, subscriptionId) {
+  const id = String(subscriptionId || '').trim();
+  return groupSubscriptions(group).find((subscription) => subscription.id === id) || null;
+}
+
+function nodeGroupNames(data = state.data) {
+  return Array.from(new Set((data?.nodes || []).map(nodeGroupName))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+function visibleNodes(data = state.data) {
+  const nodes = data?.nodes || [];
+  return state.nodeGroupFilter ? nodes.filter((node) => nodeGroupName(node) === state.nodeGroupFilter) : nodes;
+}
+
+function renderNodeGroupFilter(data = state.data) {
+  const select = $('#nodeGroupFilter');
+  if (!select) return;
+  const groups = nodeGroupNames(data);
+  if (state.nodeGroupFilter && !groups.includes(state.nodeGroupFilter)) state.nodeGroupFilter = '';
+  select.innerHTML = '<option value="">全部分组</option>' + groups.map((group) => '<option value="' + escapeHtml(group) + '"' + (group === state.nodeGroupFilter ? ' selected' : '') + '>' + escapeHtml(group) + '</option>').join('');
+}
+
 function getGroupById(id) {
   return state.data?.groups.find((group) => group.id === id) || null;
 }
@@ -90,15 +133,21 @@ function renderGroupNameList(data) {
   list.innerHTML = (data.groups || []).map((group) => `<option value="${escapeHtml(group.name)}"></option>`).join('');
 }
 
-function fillSubscriptionForm(group) {
+function fillSubscriptionForm(group, subscription = null) {
+  const groupIdInput = $('#subscriptionGroupId');
+  const subscriptionIdInput = $('#subscriptionId');
   const nameInput = $('#subscriptionGroupName');
+  const subscriptionNameInput = $('#subscriptionName');
   const urlInput = $('#subscriptionUrl');
   const intervalInput = $('#subscriptionIntervalMin');
+  if (groupIdInput) groupIdInput.value = group?.id || '';
+  if (subscriptionIdInput) subscriptionIdInput.value = subscription?.id || '';
   if (nameInput) nameInput.value = group?.name || '';
-  if (urlInput) urlInput.value = group?.subscriptionUrl || '';
+  if (subscriptionNameInput) subscriptionNameInput.value = subscription?.name || '';
+  if (urlInput) urlInput.value = subscription?.url || '';
   if (intervalInput) intervalInput.value = group?.subscriptionUpdateIntervalMin || 60;
-  nameInput?.focus?.();
-  nameInput?.select?.();
+  (urlInput || nameInput)?.focus?.();
+  if (subscription) urlInput?.select?.();
 }
 
 function renderFirewall(data) {
@@ -137,16 +186,18 @@ function selectedNodeIds() {
 }
 
 function updateBulkSelectionUi(data = state.data) {
-  const nodes = data?.nodes || [];
+  const nodes = visibleNodes(data);
+  const visibleIds = new Set(nodes.map((node) => node.id));
   const selected = selectedNodeIds();
   const count = selected.length;
+  const visibleSelectedCount = selected.filter((id) => visibleIds.has(id)).length;
   const countEl = $('#selectedNodeCount');
   if (countEl) countEl.textContent = `已选 ${count} 个`;
 
   const selectAll = $('#selectAllNodes');
   if (selectAll) {
-    selectAll.checked = nodes.length > 0 && count === nodes.length;
-    selectAll.indeterminate = count > 0 && count < nodes.length;
+    selectAll.checked = nodes.length > 0 && visibleSelectedCount === nodes.length;
+    selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < nodes.length;
   }
 
   ['#batchGroupBtn', '#batchEnableBtn', '#batchDisableBtn', '#batchTestBtn', '#batchDeleteBtn'].forEach((selector) => {
@@ -297,40 +348,64 @@ function renderGroups(data) {
     const nodes = groupNodes(group);
     const usable = nodes.filter(usableNode);
     const selected = getNodeById(group.selectedNodeId);
+    const interval = group.subscriptionUpdateIntervalMin || 60;
+    const subscriptions = groupSubscriptions(group);
     const options = nodes.map((node) => {
       const disabled = usableNode(node) ? '' : ' disabled';
-      const label = `${node.name}${usableNode(node) ? '' : '（不可用）'}`;
-      return `<option value="${escapeHtml(node.id)}"${node.id === group.selectedNodeId ? ' selected' : ''}${disabled}>${escapeHtml(label)}</option>`;
+      const label = node.name + (usableNode(node) ? '' : '（不可用）');
+      const selectedAttr = node.id === group.selectedNodeId ? ' selected' : '';
+      return '<option value="' + escapeHtml(node.id) + '"' + selectedAttr + disabled + '>' + escapeHtml(label) + '</option>';
     }).join('');
-    const subscriptionUrl = group.subscriptionUrl || '';
-    const subscriptionSummary = subscriptionUrl
-      ? `
-          <div class="group-subscription">
-            <div class="node-meta group-subscription-url" title="${escapeHtml(subscriptionUrl)}">${escapeHtml(subscriptionUrl)}</div>
-            <div class="node-meta">间隔：${group.subscriptionUpdateIntervalMin || 60} 分钟 · 上次：${formatTime(group.subscriptionLastSyncAt)} · 数量：${group.subscriptionLastCount || 0}</div>
-            ${group.subscriptionLastError ? `<div class="node-meta node-error" title="${escapeHtml(group.subscriptionLastError)}">错误：${escapeHtml(group.subscriptionLastError)}</div>` : ''}
-          </div>`
+    const subscriptionSummary = subscriptions.length
+      ? '<div class="group-subscriptions">' + subscriptions.map((subscription) => {
+          const enabled = subscription.enabled !== false;
+          const statusClass = subscription.lastError ? 'bad' : (enabled ? 'good' : 'warn');
+          const statusText = subscription.lastError ? '异常' : (enabled ? '启用' : '禁用');
+          const title = subscription.name || '订阅';
+          const error = subscription.lastError
+            ? '<div class="node-meta node-error" title="' + escapeHtml(subscription.lastError) + '">错误：' + escapeHtml(subscription.lastError) + '</div>'
+            : '';
+          return '<div class="group-subscription-item">'
+            + '<div class="group-subscription-main">'
+            + '<div class="group-subscription-head"><strong title="' + escapeHtml(title) + '">' + escapeHtml(title) + '</strong><span class="pill ' + statusClass + '">' + statusText + '</span><span class="pill">' + (subscription.lastCount || 0) + ' 个</span></div>'
+            + '<div class="node-meta group-subscription-url" title="' + escapeHtml(subscription.url) + '">' + escapeHtml(subscription.url) + '</div>'
+            + '<div class="node-meta">上次：' + formatTime(subscription.lastSyncAt) + ' · 间隔：' + interval + ' 分钟</div>'
+            + error
+            + '</div>'
+            + '<div class="group-subscription-actions">'
+            + '<button data-subscription-edit="' + escapeHtml(group.id) + '" data-subscription-id="' + escapeHtml(subscription.id) + '" type="button">编辑</button>'
+            + '<button data-subscription-sync="' + escapeHtml(group.id) + '" data-subscription-id="' + escapeHtml(subscription.id) + '" type="button">同步</button>'
+            + '<button data-subscription-delete="' + escapeHtml(group.id) + '" data-subscription-id="' + escapeHtml(subscription.id) + '" type="button">删除</button>'
+            + '</div>'
+            + '</div>';
+        }).join('') + '</div>'
       : '<div class="node-meta">未配置订阅</div>';
-    return `
-      <article class="group-item">
-        <div>
-          <div class="group-title">
-            <strong>${escapeHtml(group.name)}</strong>
-            ${group.id === data.settings.activeGroupId ? '<span class="pill good">活动</span>' : ''}
-            <span class="pill">${usable.length}/${nodes.length}</span>
-          </div>
-          <div class="node-meta">当前：${escapeHtml(selected?.name || '--')}</div>
-          ${subscriptionSummary}
-        </div>
-        <div class="group-actions">
-          <select data-group-select="${escapeHtml(group.id)}">${options || '<option value="">无节点</option>'}</select>
-          <button data-group-subscription-edit="${escapeHtml(group.id)}" type="button">${group.subscriptionUrl ? '编辑订阅' : '设置订阅'}</button>
-          ${group.subscriptionUrl ? `<button data-group-subscription-sync="${escapeHtml(group.id)}" type="button">同步订阅</button>` : ''}
-          <button data-group-active="${escapeHtml(group.id)}" type="button">设为活动</button>
-          <button data-group-test="${escapeHtml(group.id)}" type="button">测速</button>
-          <button data-group-delete="${escapeHtml(group.id)}" type="button">删除</button>
-        </div>
-      </article>`;
+    const syncAllButton = subscriptions.length
+      ? '<button data-group-subscription-sync="' + escapeHtml(group.id) + '" type="button">同步全部</button>'
+      : '';
+    const groupError = group.subscriptionLastError
+      ? '<div class="node-meta node-error" title="' + escapeHtml(group.subscriptionLastError) + '">订阅错误：' + escapeHtml(group.subscriptionLastError) + '</div>'
+      : '';
+    return '<article class="group-item">'
+      + '<div>'
+      + '<div class="group-title"><strong>' + escapeHtml(group.name) + '</strong>'
+      + (group.id === data.settings.activeGroupId ? '<span class="pill good">活动</span>' : '')
+      + '<span class="pill">' + usable.length + '/' + nodes.length + '</span>'
+      + '<span class="pill">订阅 ' + subscriptions.length + '</span></div>'
+      + '<div class="node-meta">当前：' + escapeHtml(selected?.name || '--') + '</div>'
+      + '<div class="node-meta">订阅同步：' + formatTime(group.subscriptionLastSyncAt) + ' · 总计：' + (group.subscriptionLastCount || 0) + ' 个</div>'
+      + groupError
+      + subscriptionSummary
+      + '</div>'
+      + '<div class="group-actions">'
+      + '<select data-group-select="' + escapeHtml(group.id) + '">' + (options || '<option value="">无节点</option>') + '</select>'
+      + '<button data-group-subscription-add="' + escapeHtml(group.id) + '" type="button">添加订阅</button>'
+      + syncAllButton
+      + '<button data-group-active="' + escapeHtml(group.id) + '" type="button">设为活动</button>'
+      + '<button data-group-test="' + escapeHtml(group.id) + '" type="button">测速</button>'
+      + '<button data-group-delete="' + escapeHtml(group.id) + '" type="button">删除</button>'
+      + '</div>'
+      + '</article>';
   }).join('');
 }
 
@@ -342,15 +417,25 @@ function renderGroupSettings(data) {
 }
 
 function renderNodes(data) {
-  $('#nodeCount').textContent = `${data.nodes.length} 个节点`;
+  renderNodeGroupFilter(data);
+  const nodes = visibleNodes(data);
+  const total = data.nodes.length;
+  $('#nodeCount').textContent = state.nodeGroupFilter
+    ? `当前分组 ${nodes.length}/${total} 个节点`
+    : `${total} 个节点`;
   const body = $('#nodesTable');
   pruneSelectedNodes(data);
-  if (!data.nodes.length) {
+  if (!total) {
     body.innerHTML = '<tr><td colspan="7" class="muted">暂无节点</td></tr>';
     updateBulkSelectionUi(data);
     return;
   }
-  body.innerHTML = data.nodes.map((node) => {
+  if (!nodes.length) {
+    body.innerHTML = '<tr><td colspan="7" class="muted">当前分组暂无节点</td></tr>';
+    updateBulkSelectionUi(data);
+    return;
+  }
+  body.innerHTML = nodes.map((node) => {
     const errorText = node.error || '';
     return `
     <tr class="${state.selectedNodeIds.has(node.id) ? 'selected-row' : ''}">
@@ -359,7 +444,7 @@ function renderNodes(data) {
         <div class="node-name">${escapeHtml(node.name)}</div>
         <div class="node-meta">${escapeHtml(node.type.toUpperCase())}</div>
       </td>
-      <td>${escapeHtml(node.group || '--')}</td>
+      <td>${escapeHtml(nodeGroupName(node))}</td>
       <td>
         <div class="node-address">${escapeHtml(node.server)}:${escapeHtml(node.port)}</div>
         <div class="node-meta node-error" title="${escapeHtml(errorText)}">${escapeHtml(errorText)}</div>
@@ -382,6 +467,7 @@ function renderNodes(data) {
 function renderSettings(data) {
   $('#settingSingBox').value = data.settings.singBoxPath || '';
   $('#settingTestUrl').value = data.settings.testUrl || '';
+  $('#settingSubscriptionConverter').value = data.settings.subscriptionConverterUrl || '';
   $('#settingInterval').value = data.settings.testIntervalSec || 300;
   $('#settingProxyHost').value = data.settings.proxyListenHost || '';
   $('#settingHttpPort').value = data.settings.httpPort || '';
@@ -520,25 +606,40 @@ $('#groupTestIntervalForm').addEventListener('submit', (event) => {
 $('#subscriptionForm').addEventListener('submit', (event) => {
   event.preventDefault();
   runAction(async () => {
+    const groupId = $('#subscriptionGroupId').value.trim();
+    const subscriptionId = $('#subscriptionId').value.trim();
     const groupName = $('#subscriptionGroupName').value.trim();
+    const subscriptionName = $('#subscriptionName').value.trim();
     const subscriptionUrl = $('#subscriptionUrl').value.trim();
     const interval = Math.max(1, Number($('#subscriptionIntervalMin').value || 60));
-    if (!groupName) throw new Error('请输入分组名称');
+    if (!groupId && !groupName) throw new Error('请输入分组名称');
     if (!subscriptionUrl) throw new Error('请输入订阅链接');
     const payload = await request('/api/groups/subscription', {
       method: 'POST',
       body: JSON.stringify({
+        groupId,
         groupName,
+        subscriptionId,
+        subscriptionName,
         subscriptionUrl,
         subscriptionUpdateIntervalMin: interval
       })
     });
+    $('#subscriptionGroupId').value = payload.groupId || groupId;
+    $('#subscriptionId').value = '';
+    $('#subscriptionName').value = '';
+    $('#subscriptionUrl').value = '';
     if (payload.syncError) {
-      toast(`订阅已保存，但同步失败：${payload.syncError}`);
+      toast('订阅已保存，但同步失败：' + payload.syncError);
       return;
     }
-    toast(`订阅已同步 ${payload.syncedCount || 0} 个节点`);
+    toast('订阅已同步 ' + (payload.syncedCount || 0) + ' 个节点');
   });
+});
+
+$('#subscriptionGroupName').addEventListener('input', () => {
+  $('#subscriptionGroupId').value = '';
+  $('#subscriptionId').value = '';
 });
 
 $('#importForm').addEventListener('submit', (event) => {
@@ -586,6 +687,7 @@ $('#settingsForm').addEventListener('submit', (event) => {
       body: JSON.stringify({
         singBoxPath: $('#settingSingBox').value,
         testUrl: $('#settingTestUrl').value,
+        subscriptionConverterUrl: $('#settingSubscriptionConverter').value,
         testIntervalSec: Number($('#settingInterval').value),
         proxyListenHost: $('#settingProxyHost').value,
         httpPort: Number($('#settingHttpPort').value),
@@ -598,10 +700,19 @@ $('#settingsForm').addEventListener('submit', (event) => {
 });
 
 document.addEventListener('change', (event) => {
-  if (event.target.id === 'selectAllNodes') {
+  if (event.target.id === 'nodeGroupFilter') {
+    state.nodeGroupFilter = event.target.value;
     state.selectedNodeIds.clear();
+    renderNodes(state.data);
+    return;
+  }
+
+  if (event.target.id === 'selectAllNodes') {
+    const nodes = visibleNodes(state.data);
     if (event.target.checked) {
-      for (const node of state.data?.nodes || []) state.selectedNodeIds.add(node.id);
+      for (const node of nodes) state.selectedNodeIds.add(node.id);
+    } else {
+      for (const node of nodes) state.selectedNodeIds.delete(node.id);
     }
     renderNodes(state.data);
     return;
@@ -642,8 +753,11 @@ document.addEventListener('click', (event) => {
   const nodeToggle = target.dataset.nodeToggle;
   const nodeDelete = target.dataset.nodeDelete;
   const nodeGroup = target.dataset.nodeGroup;
-  const groupSubscriptionEdit = target.dataset.groupSubscriptionEdit;
+  const groupSubscriptionAdd = target.dataset.groupSubscriptionAdd;
   const groupSubscriptionSync = target.dataset.groupSubscriptionSync;
+  const subscriptionEdit = target.dataset.subscriptionEdit;
+  const subscriptionSync = target.dataset.subscriptionSync;
+  const subscriptionDelete = target.dataset.subscriptionDelete;
   const groupActive = target.dataset.groupActive;
   const groupTest = target.dataset.groupTest;
   const groupDelete = target.dataset.groupDelete;
@@ -669,16 +783,46 @@ document.addEventListener('click', (event) => {
       method: 'PUT',
       body: JSON.stringify({ group })
     }), '分组已更新');
-  } else if (groupSubscriptionEdit) {
-    const group = getGroupById(groupSubscriptionEdit);
+  } else if (groupSubscriptionAdd) {
+    const group = getGroupById(groupSubscriptionAdd);
     if (!group) return;
-    fillSubscriptionForm(group);
+    fillSubscriptionForm(group, null);
+    setView('groups');
+  } else if (subscriptionEdit) {
+    const group = getGroupById(subscriptionEdit);
+    if (!group) return;
+    const subscription = getSubscriptionById(group, target.dataset.subscriptionId);
+    if (!subscription) return;
+    fillSubscriptionForm(group, subscription);
     setView('groups');
   } else if (groupSubscriptionSync) {
-    runAction(() => request(`/api/groups/${encodeURIComponent(groupSubscriptionSync)}/subscription-sync`, {
+    runAction(async () => {
+      const payload = await request(`/api/groups/${encodeURIComponent(groupSubscriptionSync)}/subscription-sync`, {
+        method: 'POST',
+        body: '{}'
+      });
+      if (payload.syncError) {
+        toast('订阅已同步，但有错误：' + payload.syncError);
+      } else {
+        toast('订阅已同步');
+      }
+    });
+  } else if (subscriptionSync) {
+    const group = getGroupById(subscriptionSync);
+    if (!group) return;
+    const subscription = getSubscriptionById(group, target.dataset.subscriptionId);
+    if (!subscription) return;
+    runAction(() => request(`/api/groups/${encodeURIComponent(subscriptionSync)}/subscriptions/${encodeURIComponent(subscription.id)}/sync`, {
       method: 'POST',
       body: '{}'
     }), '订阅已同步');
+  } else if (subscriptionDelete) {
+    const group = getGroupById(subscriptionDelete);
+    if (!group) return;
+    const subscription = getSubscriptionById(group, target.dataset.subscriptionId);
+    if (!subscription) return;
+    if (!confirm('删除这个订阅？对应拉取的节点也会一起删除。')) return;
+    runAction(() => request(`/api/groups/${encodeURIComponent(subscriptionDelete)}/subscriptions/${encodeURIComponent(subscription.id)}`, { method: 'DELETE' }), '订阅已删除');
   } else if (groupActive) {
     runAction(() => request(`/api/groups/${encodeURIComponent(groupActive)}`, {
       method: 'PUT',

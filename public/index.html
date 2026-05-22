@@ -175,25 +175,31 @@
             </div>
             <form id="groupTestIntervalForm" class="interval-form">
               <label>
-                <span>??????????</span>
+                <span>自动测速间隔（分钟）</span>
                 <input id="groupTestIntervalMin" type="number" min="1" max="1440" inputmode="numeric">
               </label>
-              <button type="submit">????</button>
+              <button type="submit">保存间隔</button>
             </form>
             <form id="subscriptionForm" class="subscription-form">
+              <input id="subscriptionGroupId" type="hidden">
+              <input id="subscriptionId" type="hidden">
               <label>
-                <span>????</span>
-                <input id="subscriptionGroupName" list="groupNameList" placeholder="????">
+                <span>订阅分组</span>
+                <input id="subscriptionGroupName" list="groupNameList" placeholder="分组名称">
               </label>
-              <label class="wide">
-                <span>????</span>
+              <label>
+                <span>订阅名称</span>
+                <input id="subscriptionName" placeholder="可选">
+              </label>
+              <label>
+                <span>订阅链接</span>
                 <input id="subscriptionUrl" placeholder="https://">
               </label>
               <label>
-                <span>??????????</span>
+                <span>自动更新间隔（分钟）</span>
                 <input id="subscriptionIntervalMin" type="number" min="1" max="10080" inputmode="numeric" value="60">
               </label>
-              <button type="submit">?????</button>
+              <button type="submit">保存并同步</button>
             </form>
             <datalist id="groupNameList"></datalist>
             <div id="groupsList" class="group-list"></div>
@@ -208,7 +214,7 @@
             </div>
 
             <form id="importForm" class="stack">
-              <input id="importGroup" placeholder="导入到分组（可空）">
+              <input id="importGroup" placeholder="空则默认分组">
               <textarea id="importText" rows="7" placeholder="节点链接，每行一个"></textarea>
               <button class="primary" type="submit">导入节点</button>
             </form>
@@ -250,6 +256,7 @@
             </div>
           </div>
           <div class="bulk-toolbar">
+            <label class="node-filter"><span>分组</span><select id="nodeGroupFilter"><option value="">全部分组</option></select></label>
             <span id="selectedNodeCount" class="muted">已选 0 个</span>
             <button id="batchGroupBtn" type="button">批量分组</button>
             <button id="batchEnableBtn" type="button">批量启用</button>
@@ -288,6 +295,7 @@
             <form id="settingsForm" class="stack compact">
               <label><span>sing-box 路径</span><input id="settingSingBox"></label>
               <label><span>测速地址</span><input id="settingTestUrl"></label>
+              <label><span>订阅转换地址</span><input id="settingSubscriptionConverter" placeholder="https://clawsub.7979.pp.ua/"></label>
               <label><span>测速间隔（秒）</span><input id="settingInterval" type="number" min="30" step="1"></label>
               <label><span>代理监听</span><input id="settingProxyHost"></label>
               <label><span>HTTP 端口</span><input id="settingHttpPort" type="number"></label>
@@ -324,32 +332,32 @@
           <article class="panel">
             <div class="panel-head">
               <div>
-                <h3>?????</h3>
-                <p class="muted">iptables INPUT ??</p>
+                <h3>防火墙放行</h3>
+                <p class="muted">iptables INPUT 规则</p>
               </div>
               <span id="firewallStatus" class="muted">--</span>
             </div>
             <div class="firewall-panel">
               <label>
-                <span>?? IP / ??</span>
+                <span>来源 IP / 网段</span>
                 <input id="firewallSource" placeholder="172.22.0.0/16">
               </label>
               <div class="firewall-port-grid">
                 <div>
-                  <span>HTTP ??</span>
+                  <span>HTTP 端口</span>
                   <strong id="firewallHttpPort">--</strong>
                 </div>
                 <div class="button-pair">
-                  <button type="button" data-firewall-action="open" data-firewall-port="http">?? HTTP</button>
-                  <button type="button" data-firewall-action="delete" data-firewall-port="http">?? HTTP</button>
+                  <button type="button" data-firewall-action="open" data-firewall-port="http">开放 HTTP</button>
+                  <button type="button" data-firewall-action="delete" data-firewall-port="http">删除 HTTP</button>
                 </div>
                 <div>
-                  <span>SOCKS ??</span>
+                  <span>SOCKS 端口</span>
                   <strong id="firewallSocksPort">--</strong>
                 </div>
                 <div class="button-pair">
-                  <button type="button" data-firewall-action="open" data-firewall-port="socks">?? SOCKS</button>
-                  <button type="button" data-firewall-action="delete" data-firewall-port="socks">?? SOCKS</button>
+                  <button type="button" data-firewall-action="open" data-firewall-port="socks">开放 SOCKS</button>
+                  <button type="button" data-firewall-action="delete" data-firewall-port="socks">删除 SOCKS</button>
                 </div>
               </div>
               <div id="firewallRules" class="firewall-rules"></div>

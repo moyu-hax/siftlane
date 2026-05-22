@@ -305,7 +305,7 @@ label span {
 
 .subscription-form {
   display: grid;
-  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr) minmax(180px, 240px) auto;
+  grid-template-columns: minmax(150px, 210px) minmax(140px, 190px) minmax(0, 1fr) minmax(170px, 220px) auto;
   gap: 8px;
   align-items: end;
   margin-top: 12px;
@@ -412,10 +412,51 @@ label span {
   width: auto;
 }
 
-.group-subscription {
+.group-subscriptions {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-top: 10px;
+}
+
+.group-subscription-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px dashed var(--line);
+}
+
+.group-subscription-item:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.group-subscription-main {
+  min-width: 0;
+}
+
+.group-subscription-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.group-subscription-head strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-subscription-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .group-subscription-url,
@@ -444,6 +485,22 @@ label span {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
+}
+
+.node-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.node-filter span {
+  margin: 0;
+}
+
+.node-filter select {
+  width: auto;
+  min-width: 150px;
 }
 
 button:disabled {
@@ -683,5 +740,13 @@ pre {
 
   .group-actions select {
     width: 100%;
+  }
+
+  .group-subscription-item {
+    grid-template-columns: 1fr;
+  }
+
+  .group-subscription-actions {
+    justify-content: flex-start;
   }
 }
