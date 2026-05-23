@@ -69,7 +69,7 @@ function defaultState() {
       httpPort: 18999,
       socksPort: 18998,
       singBoxPath: process.env.SING_BOX_PATH || 'sing-box',
-      testUrl: 'http://www.gstatic.com/generate_204',
+      testUrl: 'https://www.gstatic.com/generate_204',
       testIntervalSec: 300,
       switchPolicy: 'best',
       switchMode: 'manual',
@@ -134,7 +134,10 @@ function normalizeState(input) {
   next.settings.httpPort = toInt(next.settings.httpPort, 18999);
   next.settings.socksPort = toInt(next.settings.socksPort, 18998);
   next.settings.singBoxPath = process.env.SING_BOX_PATH || normalizeString(next.settings.singBoxPath) || 'sing-box';
-  next.settings.testUrl = normalizeString(next.settings.testUrl) || 'http://www.gstatic.com/generate_204';
+  next.settings.testUrl = normalizeString(next.settings.testUrl) || 'https://www.gstatic.com/generate_204';
+  if (next.settings.testUrl === 'http://www.gstatic.com/generate_204' || next.settings.testUrl === 'https://api.ipify.org') {
+    next.settings.testUrl = 'https://www.gstatic.com/generate_204';
+  }
   next.settings.testIntervalSec = Math.min(86400, Math.max(30, toInt(next.settings.testIntervalSec, 300)));
   next.settings.switchPolicy = ['best', 'random'].includes(next.settings.switchPolicy) ? next.settings.switchPolicy : 'best';
   next.settings.switchMode = ['manual', 'auto'].includes(next.settings.switchMode) ? next.settings.switchMode : 'manual';
@@ -185,6 +188,8 @@ function normalizeNode(node) {
     username: normalizeString(node.username),
     password: normalizeString(node.password),
     method: normalizeString(node.method),
+    plugin: normalizeString(node.plugin),
+    pluginOpts: normalizeString(node.pluginOpts || node.plugin_opts || node.pluginOptions),
     uuid: normalizeString(node.uuid),
     alterId: toInt(node.alterId, 0),
     security: normalizeString(node.security).toLowerCase(),
@@ -603,6 +608,11 @@ function buildNodeOutbound(node) {
     outbound.type = 'shadowsocks';
     outbound.method = node.method || 'aes-256-gcm';
     outbound.password = node.password;
+    const plugin = normalizeShadowsocksPlugin(node.plugin);
+    if (plugin) {
+      outbound.plugin = plugin;
+      if (node.pluginOpts) outbound.plugin_opts = node.pluginOpts;
+    }
   } else if (node.type === 'vmess') {
     outbound.uuid = node.uuid;
     outbound.security = node.security && node.security !== 'tls' ? node.security : 'auto';
@@ -837,7 +847,7 @@ async function probeProxy(port, rawUrl) {
   const status = target.protocol === 'https:'
     ? await probeHttpsProxy(port, target)
     : await probeHttpProxy(port, target);
-  if (status < 200 || status >= 500) {
+  if (status < 200 || status >= 400) {
     throw new Error(`HTTP ${status}`);
   }
   return Date.now() - started;
@@ -1467,6 +1477,50 @@ function parseProxyLink(line, groupName = '') {
   return null;
 }
 
+function normalizeShadowsocksPlugin(value) {
+  const plugin = normalizeString(value).toLowerCase();
+  if (!plugin) return '';
+  if (plugin === 'v2ray-plugin' || plugin === 'obfs-local') return plugin;
+  return '';
+}
+
+function parseShadowsocksCredential(value) {
+  const text = normalizeString(value);
+  if (!text) return { method: '', password: '' };
+  const splitCredential = (credential) => {
+    const index = credential.indexOf(':');
+    if (index < 0) return null;
+    return {
+      method: credential.slice(0, index),
+      password: credential.slice(index + 1)
+    };
+  };
+
+  const direct = splitCredential(text);
+  if (direct) return direct;
+
+  try {
+    const decoded = decodeBase64(text).trim();
+    const parsed = splitCredential(decoded);
+    if (parsed) return parsed;
+  } catch {
+    // Not a base64 encoded SIP002 credential.
+  }
+
+  return { method: text, password: '' };
+}
+
+function parseShadowsocksPlugin(params) {
+  const rawPlugin = normalizeString(params.get('plugin') || params.get('plugin_name') || params.get('pluginName'));
+  const rawOpts = normalizeString(params.get('plugin_opts') || params.get('plugin-opts') || params.get('pluginOpts'));
+  if (!rawPlugin && !rawOpts) return { plugin: '', pluginOpts: '' };
+
+  const parts = rawPlugin.split(';').map((part) => part.trim()).filter(Boolean);
+  const plugin = normalizeShadowsocksPlugin(parts.shift() || rawPlugin);
+  const pluginOpts = [...parts, rawOpts].filter(Boolean).join(';');
+  return { plugin, pluginOpts };
+}
+
 function parseShadowsocksLink(line, groupName = '') {
   const raw = line.slice('ss://'.length);
   const [withoutHash, hash = ''] = raw.split('#');
@@ -1478,11 +1532,12 @@ function parseShadowsocksLink(line, groupName = '') {
   const url = new URL(`ss://${urlText}`);
   let method = decodeURIComponent(url.username || '');
   let password = decodeURIComponent(url.password || '');
-  if (!password && method.includes(':')) {
-    const parts = method.split(':');
-    method = parts.shift();
-    password = parts.join(':');
+  if (!password) {
+    const credential = parseShadowsocksCredential(method);
+    method = credential.method;
+    password = credential.password;
   }
+  const { plugin, pluginOpts } = parseShadowsocksPlugin(url.searchParams);
   return normalizeNode({
     id: createId('node_'),
     type: 'shadowsocks',
@@ -1491,6 +1546,8 @@ function parseShadowsocksLink(line, groupName = '') {
     port: url.port,
     method,
     password,
+    plugin,
+    pluginOpts,
     group: groupName
   });
 }
