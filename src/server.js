@@ -20,6 +20,14 @@ const TEMP_DIR = path.join(DATA_DIR, 'tmp');
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const TEST_TICK_MS = 10 * 1000;
 const TEST_TIMEOUT_MS = 10 * 1000;
+const SPEEDTEST_SAMPLE_COUNT = 2;
+const SPEEDTEST_SAMPLE_INTERVAL_MS = 100;
+const SPEEDTEST_CONCURRENCY = 5;
+const SPEEDTEST_WARMUP_MS = 1000;
+const AUTO_DISABLE_FAIL_THRESHOLD = 3;
+const BEST_SWITCH_MIN_IMPROVEMENT_MS = 80;
+const BEST_SWITCH_COOLDOWN_MS = 5 * 60 * 1000;
+const CURRENT_FAIL_SWITCH_THRESHOLD = 2;
 const MAX_LOG_LINES = 200;
 const DEFAULT_GROUP_NAME = '默认分组';
 const DEFAULT_SUBSCRIPTION_CONVERTER_URL = 'https://clawsub.7979.pp.ua/';
@@ -164,6 +172,70 @@ function normalizeIso(value) {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 }
 
+function normalizeBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  const text = normalizeString(value).toLowerCase();
+  if (!text) return fallback;
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true;
+  if (['0', 'false', 'no', 'off'].includes(text)) return false;
+  return fallback;
+}
+
+function firstString(...values) {
+  for (const value of values) {
+    if (value && typeof value === 'object') continue;
+    const text = normalizeString(value);
+    if (text) return text;
+  }
+  return '';
+}
+
+function normalizePositiveInt(value, fallback = 0) {
+  const parsed = toInt(value, fallback);
+  return parsed > 0 ? parsed : fallback;
+}
+
+function normalizeAlpn(value) {
+  const items = Array.isArray(value) ? value : normalizeString(value).split(',');
+  return items.map((item) => normalizeString(item)).filter(Boolean);
+}
+
+function objectOrEmpty(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function headerValue(headers, name) {
+  const source = objectOrEmpty(headers);
+  const direct = firstString(source[name], source[name.toLowerCase()]);
+  if (direct) return direct;
+  const found = Object.keys(source).find((key) => key.toLowerCase() === name.toLowerCase());
+  return found ? normalizeString(source[found]) : '';
+}
+
+function normalizeWsEarlyData(pathValue, explicitEarlyData = 0) {
+  let wsPath = normalizeString(pathValue);
+  let maxEarlyData = normalizePositiveInt(explicitEarlyData, 0);
+  if (!wsPath) return { path: '', maxEarlyData };
+
+  try {
+    const parsed = new URL(wsPath.startsWith('/') ? `ws://siftlane.local${wsPath}` : `ws://siftlane.local/${wsPath}`);
+    const ed = normalizePositiveInt(parsed.searchParams.get('ed') || parsed.searchParams.get('max_early_data'), 0);
+    if (!maxEarlyData && ed) maxEarlyData = ed;
+    parsed.searchParams.delete('ed');
+    parsed.searchParams.delete('max_early_data');
+    wsPath = `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    const match = wsPath.match(/(?:^|[?&])(?:ed|max_early_data)=(\d+)/i);
+    if (!maxEarlyData && match) maxEarlyData = normalizePositiveInt(match[1], 0);
+    wsPath = wsPath
+      .replace(/([?&])(?:ed|max_early_data)=\d+(&?)/ig, (full, prefix, suffix) => (prefix === '?' && suffix ? '?' : suffix ? prefix : ''))
+      .replace(/[?&]$/, '');
+  }
+
+  if (wsPath && !wsPath.startsWith('/')) wsPath = `/${wsPath}`;
+  return { path: wsPath, maxEarlyData };
+}
+
 function normalizeNode(node) {
   if (!node || typeof node !== 'object') return null;
   const id = normalizeString(node.id) || createId('node_');
@@ -171,6 +243,29 @@ function normalizeNode(node) {
   const server = normalizeString(node.server);
   const port = toInt(node.port || node.server_port, 0);
   if (!id || !type || !server || !port) return null;
+
+  const tlsConfig = objectOrEmpty(node.tls);
+  const realityConfig = objectOrEmpty(tlsConfig.reality);
+  const utlsConfig = objectOrEmpty(tlsConfig.utls);
+  const transportConfig = objectOrEmpty(node.transport);
+  const headers = objectOrEmpty(transportConfig.headers || node.headers);
+  const rawSecurity = normalizeString(node.security || node.cipher || node.scy).toLowerCase();
+  const normalizedSecurity = type === 'vmess' && ['tls', 'reality'].includes(rawSecurity)
+    ? firstString(node.cipher, node.scy, 'auto').toLowerCase()
+    : rawSecurity;
+  const rawTransport = transportConfig.type || (typeof node.transport === 'string' ? node.transport : '') || node.network;
+  const transport = normalizeString(rawTransport).toLowerCase();
+  const wsEarlyData = normalizeWsEarlyData(
+    firstString(node.wsPath, node.path, transportConfig.path),
+    node.maxEarlyData ?? node.max_early_data ?? transportConfig.max_early_data ?? node.ed
+  );
+  const hasTlsObject = node.tls && typeof node.tls === 'object';
+  const tlsEnabled = normalizeBoolean(
+    tlsConfig.enabled ?? node.tlsEnabled ?? node.tls_enabled ?? (typeof node.tls === 'boolean' ? node.tls : ''),
+    hasTlsObject || rawSecurity === 'tls' || rawSecurity === 'reality'
+  );
+  const obfsConfig = objectOrEmpty(node.obfs);
+  const congestionControl = firstString(node.congestionControl, node.congestion_control, node.congestion);
 
   return {
     id,
@@ -185,6 +280,8 @@ function normalizeNode(node) {
     latencyMs: Number.isFinite(Number(node.latencyMs)) ? Number(node.latencyMs) : null,
     lastTestAt: normalizeIso(node.lastTestAt),
     error: normalizeString(node.error) || null,
+    failCount: Math.max(0, toInt(node.failCount, 0)),
+    successCount: Math.max(0, toInt(node.successCount, 0)),
     username: normalizeString(node.username),
     password: normalizeString(node.password),
     method: normalizeString(node.method),
@@ -192,17 +289,30 @@ function normalizeNode(node) {
     pluginOpts: normalizeString(node.pluginOpts || node.plugin_opts || node.pluginOptions),
     uuid: normalizeString(node.uuid),
     alterId: toInt(node.alterId, 0),
-    security: normalizeString(node.security).toLowerCase(),
-    sni: normalizeString(node.sni),
-    insecure: Boolean(node.insecure),
-    transport: normalizeString(node.transport || node.network).toLowerCase(),
-    wsPath: normalizeString(node.wsPath || node.path),
-    wsHost: normalizeString(node.wsHost || node.host),
-    serviceName: normalizeString(node.serviceName || node.service_name),
-    pbk: normalizeString(node.pbk),
-    sid: normalizeString(node.sid),
+    security: normalizedSecurity,
+    tls: tlsEnabled,
+    sni: firstString(node.sni, node.serverName, node.server_name, tlsConfig.server_name),
+    alpn: normalizeAlpn(node.alpn ?? tlsConfig.alpn),
+    insecure: normalizeBoolean(node.insecure ?? tlsConfig.insecure, false),
+    transport,
+    wsPath: wsEarlyData.path,
+    wsHost: firstString(node.wsHost, node.host, headerValue(headers, 'Host')),
+    maxEarlyData: wsEarlyData.maxEarlyData,
+    earlyDataHeaderName: firstString(node.earlyDataHeaderName, node.early_data_header_name, transportConfig.early_data_header_name),
+    serviceName: firstString(node.serviceName, node.service_name, transportConfig.service_name),
+    pbk: firstString(node.pbk, node.publicKey, node.public_key, realityConfig.public_key),
+    sid: firstString(node.sid, node.shortId, node.short_id, realityConfig.short_id),
+    spx: firstString(node.spx, node.spiderX, node.spider_x, realityConfig.spider_x),
     flow: normalizeString(node.flow),
-    fingerprint: normalizeString(node.fingerprint || node.fp),
+    fingerprint: firstString(node.fingerprint, node.fp, utlsConfig.fingerprint),
+    packetEncoding: firstString(node.packetEncoding, node.packet_encoding),
+    obfs: firstString(obfsConfig.type, node.obfs),
+    obfsPassword: firstString(obfsConfig.password, node.obfsPassword, node.obfs_password),
+    upMbps: normalizePositiveInt(node.upMbps ?? node.up_mbps, 0),
+    downMbps: normalizePositiveInt(node.downMbps ?? node.down_mbps, 0),
+    heartbeat: normalizeString(node.heartbeat),
+    congestionControl,
+    udpRelayMode: firstString(node.udpRelayMode, node.udp_relay_mode),
     sourceType: normalizeString(node.sourceType) || 'manual',
     sourceGroupId: normalizeString(node.sourceGroupId) || null,
     sourceSubscriptionId: normalizeString(node.sourceSubscriptionId || node.subscriptionId) || null,
@@ -406,7 +516,9 @@ function getNextSwitchAt() {
   if (state.settings.switchMode !== 'auto' || core.status !== 'running') return null;
   const activeGroup = getActiveGroup();
   if (!activeGroup || !getGroupNodes(activeGroup).some(nodeUsable)) return null;
-  const intervalMs = state.settings.autoSwitchIntervalMin * 60 * 1000;
+  const intervalMs = state.settings.switchPolicy === 'best'
+    ? BEST_SWITCH_COOLDOWN_MS
+    : state.settings.autoSwitchIntervalMin * 60 * 1000;
   const last = state.settings.lastSwitchAt ? Date.parse(state.settings.lastSwitchAt) : Date.now();
   if (!Number.isFinite(last)) return null;
   return new Date(last + intervalMs).toISOString();
@@ -426,8 +538,79 @@ function rotateActiveGroupSelection() {
   return next;
 }
 
+function latencyValue(node) {
+  const value = Number(node?.latencyMs);
+  return Number.isFinite(value) ? value : null;
+}
+
+function getBestLatencyNode(nodes, excludeId = null) {
+  return (nodes || [])
+    .filter((node) => nodeUsable(node) && node.id !== excludeId && node.status === 'up' && latencyValue(node) !== null)
+    .sort((a, b) => latencyValue(a) - latencyValue(b))[0] || null;
+}
+
+function decideBestSwitch({ nodes, selectedNodeId, lastSwitchAt, nowMs = Date.now() }) {
+  const usable = (nodes || []).filter(nodeUsable);
+  if (!usable.length) return null;
+
+  const current = usable.find((node) => node.id === selectedNodeId) || null;
+  if (!current) {
+    const initialBest = getBestLatencyNode(usable) || usable[0];
+    return initialBest ? { node: initialBest, reason: 'initial' } : null;
+  }
+
+  const failedEnough = Math.max(0, toInt(current.failCount, 0)) >= CURRENT_FAIL_SWITCH_THRESHOLD;
+  if (failedEnough) {
+    const failoverBest = getBestLatencyNode(usable, current.id);
+    if (failoverBest) return { node: failoverBest, reason: 'current_failed' };
+  }
+
+  const best = getBestLatencyNode(usable);
+  if (!best || best.id === current.id) return null;
+
+  const last = lastSwitchAt ? Date.parse(lastSwitchAt) : 0;
+  const cooledDown = !Number.isFinite(last) || last <= 0 || nowMs - last >= BEST_SWITCH_COOLDOWN_MS;
+  if (!cooledDown) return null;
+
+  const currentLatency = latencyValue(current);
+  const bestLatency = latencyValue(best);
+  if (currentLatency === null || bestLatency === null) return null;
+  if (bestLatency + BEST_SWITCH_MIN_IMPROVEMENT_MS <= currentLatency) {
+    return { node: best, reason: 'better_latency' };
+  }
+  return null;
+}
+
+function switchActiveGroupToBest(nowMs = Date.now()) {
+  const group = getActiveGroup();
+  if (!group) return null;
+  const decision = decideBestSwitch({
+    nodes: getGroupNodes(group),
+    selectedNodeId: group.selectedNodeId,
+    lastSwitchAt: state.settings.lastSwitchAt,
+    nowMs
+  });
+  if (!decision?.node || decision.node.id === group.selectedNodeId) return null;
+  group.selectedNodeId = decision.node.id;
+  state.settings.lastSwitchAt = new Date(nowMs).toISOString();
+  return decision;
+}
+
 async function runAutoSwitchIfDue() {
   if (testing || !core.process || state.settings.switchMode !== 'auto') return;
+  if (state.settings.switchPolicy === 'best') {
+    const before = runtimeSignature();
+    const decision = switchActiveGroupToBest();
+    if (!decision) return;
+    saveState();
+    const after = runtimeSignature();
+    appendCoreLog(`自动切换到节点：${decision.node.name}`);
+    if (before !== after) {
+      await restartCore();
+    }
+    return;
+  }
+
   const intervalMs = state.settings.autoSwitchIntervalMin * 60 * 1000;
   const last = state.settings.lastSwitchAt ? Date.parse(state.settings.lastSwitchAt) : 0;
   if (!Number.isFinite(last) || last <= 0) {
@@ -589,6 +772,52 @@ function appendCoreLog(line) {
   }
 }
 
+function shouldEnableTls(node) {
+  return Boolean(
+    node.tls ||
+    node.security === 'tls' ||
+    node.security === 'reality' ||
+    node.sni ||
+    node.pbk ||
+    ['trojan', 'hysteria2', 'tuic'].includes(node.type)
+  );
+}
+
+function buildTlsConfig(node) {
+  if (!shouldEnableTls(node)) return null;
+  const tlsConfig = {
+    enabled: true,
+    server_name: node.sni || node.server,
+    insecure: Boolean(node.insecure)
+  };
+
+  const nodeAlpn = Array.isArray(node.alpn) ? node.alpn : normalizeAlpn(node.alpn);
+  const alpn = nodeAlpn.length ? nodeAlpn : (['hysteria2', 'tuic'].includes(node.type) ? ['h3'] : []);
+  if (alpn.length) tlsConfig.alpn = alpn;
+
+  const isReality = node.security === 'reality' || Boolean(node.pbk);
+  if (isReality) {
+    tlsConfig.reality = {
+      enabled: true,
+      public_key: node.pbk
+    };
+    if (node.sid) tlsConfig.reality.short_id = node.sid;
+    if (node.spx) tlsConfig.reality.spider_x = node.spx;
+  }
+
+  if (!['hysteria2', 'tuic'].includes(node.type)) {
+    const fingerprint = node.fingerprint || (isReality ? 'chrome' : '');
+    if (fingerprint) {
+      tlsConfig.utls = {
+        enabled: true,
+        fingerprint
+      };
+    }
+  }
+
+  return tlsConfig;
+}
+
 function buildNodeOutbound(node) {
   const outbound = {
     type: node.type,
@@ -615,46 +844,34 @@ function buildNodeOutbound(node) {
     }
   } else if (node.type === 'vmess') {
     outbound.uuid = node.uuid;
-    outbound.security = node.security && node.security !== 'tls' ? node.security : 'auto';
+    outbound.security = node.security && !['tls', 'reality'].includes(node.security) ? node.security : 'auto';
     outbound.alter_id = node.alterId || 0;
-    outbound.packet_encoding = 'packetaddr';
+    outbound.packet_encoding = node.packetEncoding || 'packetaddr';
   } else if (node.type === 'vless') {
     outbound.uuid = node.uuid;
-    outbound.packet_encoding = 'xudp';
+    outbound.packet_encoding = node.packetEncoding || 'xudp';
     if (node.flow) outbound.flow = node.flow;
   } else if (node.type === 'trojan') {
     outbound.password = node.password;
   } else if (node.type === 'hysteria2') {
     outbound.password = node.password;
+    if (node.obfs) {
+      outbound.obfs = { type: node.obfs };
+      if (node.obfsPassword) outbound.obfs.password = node.obfsPassword;
+    }
+    if (node.upMbps) outbound.up_mbps = node.upMbps;
+    if (node.downMbps) outbound.down_mbps = node.downMbps;
+    if (node.heartbeat) outbound.heartbeat = node.heartbeat;
   } else if (node.type === 'tuic') {
     outbound.uuid = node.uuid;
     outbound.password = node.password;
-    outbound.congestion_control = 'bbr';
+    outbound.congestion_control = node.congestionControl || 'bbr';
+    if (node.udpRelayMode) outbound.udp_relay_mode = node.udpRelayMode;
+    if (node.heartbeat) outbound.heartbeat = node.heartbeat;
   }
 
-  if (node.security === 'tls' || node.security === 'reality' || node.sni || ['trojan', 'hysteria2', 'tuic'].includes(node.type)) {
-    outbound.tls = {
-      enabled: true,
-      server_name: node.sni || node.server,
-      insecure: Boolean(node.insecure)
-    };
-    if (node.security === 'reality' || node.pbk) {
-      outbound.tls.reality = {
-        enabled: true,
-        public_key: node.pbk,
-        short_id: node.sid
-      };
-      outbound.tls.utls = {
-        enabled: true,
-        fingerprint: node.fingerprint || 'chrome'
-      };
-    } else if (node.fingerprint) {
-      outbound.tls.utls = {
-        enabled: true,
-        fingerprint: node.fingerprint
-      };
-    }
-  }
+  const tlsConfig = buildTlsConfig(node);
+  if (tlsConfig) outbound.tls = tlsConfig;
 
   if (node.transport === 'ws') {
     outbound.transport = {
@@ -663,6 +880,10 @@ function buildNodeOutbound(node) {
       headers: {}
     };
     if (node.wsHost) outbound.transport.headers.Host = node.wsHost;
+    if (node.maxEarlyData) outbound.transport.max_early_data = node.maxEarlyData;
+    if (node.earlyDataHeaderName || node.maxEarlyData) {
+      outbound.transport.early_data_header_name = node.earlyDataHeaderName || 'Sec-WebSocket-Protocol';
+    }
   } else if (node.transport === 'grpc') {
     outbound.transport = {
       type: 'grpc',
@@ -841,93 +1062,57 @@ function getFreePort() {
   });
 }
 
-async function probeProxy(port, rawUrl) {
-  const target = new URL(rawUrl);
-  const started = Date.now();
-  const status = target.protocol === 'https:'
-    ? await probeHttpsProxy(port, target)
-    : await probeHttpProxy(port, target);
-  if (status < 200 || status >= 400) {
-    throw new Error(`HTTP ${status}`);
-  }
-  return Date.now() - started;
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function probeHttpProxy(port, target) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method: 'GET',
-      path: target.href,
-      timeout: TEST_TIMEOUT_MS,
-      headers: {
-        Host: target.host,
-        Connection: 'close'
-      }
-    }, (res) => {
-      res.resume();
-      resolve(res.statusCode || 0);
-    });
-    req.once('timeout', () => req.destroy(new Error('请求超时')));
-    req.once('error', reject);
-    req.end();
-  });
+function socksReplyMessage(code) {
+  const messages = {
+    1: 'SOCKS general failure',
+    2: 'SOCKS connection not allowed',
+    3: 'SOCKS network unreachable',
+    4: 'SOCKS host unreachable',
+    5: 'SOCKS connection refused',
+    6: 'SOCKS TTL expired',
+    7: 'SOCKS command not supported',
+    8: 'SOCKS address type not supported'
+  };
+  return messages[code] || `SOCKS error ${code}`;
 }
 
-function probeHttpsProxy(port, target) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      method: 'CONNECT',
-      path: `${target.hostname}:${target.port || 443}`,
-      timeout: TEST_TIMEOUT_MS
-    });
-    req.once('connect', (res, socket) => {
-      if ((res.statusCode || 0) !== 200) {
-        socket.destroy();
-        reject(new Error(`CONNECT ${res.statusCode || 0}`));
-        return;
-      }
-      const secure = tls.connect({
-        socket,
-        servername: target.hostname,
-        rejectUnauthorized: false
-      }, () => {
-        secure.write(`GET ${target.pathname || '/'}${target.search || ''} HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\n\r\n`);
-      });
-      let buffer = '';
-      secure.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
-        const match = buffer.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/);
-        if (match) {
-          secure.destroy();
-          resolve(toInt(match[1], 0));
-        }
-      });
-      secure.once('error', reject);
-      secure.setTimeout(TEST_TIMEOUT_MS, () => secure.destroy(new Error('timeout')));
-    });
-    req.once('timeout', () => req.destroy(new Error('请求超时')));
-    req.once('error', reject);
-    req.end();
-  });
+function normalizeProbeError(error) {
+  const text = stripAnsi(error?.message || error).trim();
+  const lower = text.toLowerCase();
+  if (/timeout|timed out|i\/o timeout|deadline|etimedout/.test(lower)) return '请求超时';
+  if (/dns|lookup|getaddrinfo|no such host|name resolution|host unreachable/.test(lower)) return 'DNS 解析失败';
+  if (/tls|ssl|certificate|handshake|wrong version/.test(lower)) return 'TLS 握手失败';
+  if (/reset|econnreset|broken pipe/.test(lower)) return '连接被重置';
+  if (/refused|econnrefused/.test(lower)) return '连接被拒绝';
+  return text || '测速失败';
 }
 
-async function measureNode(node) {
-  const port = await getFreePort();
-  const configPath = path.join(TEMP_DIR, `test-${node.id}-${Date.now()}.json`);
-  const config = {
+function compactRuntimeError(stderr, error) {
+  const detail = stderr.join('\n')
+    .split(/\r?\n/)
+    .map((line) => stripAnsi(line).trim())
+    .filter((line) => line && !/read http request: EOF/i.test(line))
+    .slice(-2)
+    .join(' | ');
+  return normalizeProbeError(detail || error);
+}
+
+function buildSpeedtestConfig(nodes, portByNodeId) {
+  const targets = (nodes || []).filter(Boolean);
+  return {
     log: { level: 'error' },
-    inbounds: [{
-      type: 'http',
-      tag: 'test-in',
+    inbounds: targets.map((node) => ({
+      type: 'socks',
+      tag: `in-${node.id}`,
       listen: '127.0.0.1',
-      listen_port: port
-    }],
+      listen_port: portByNodeId.get(node.id)
+    })),
     outbounds: [
-      buildNodeOutbound(node),
+      ...targets.map(buildNodeOutbound),
       { type: 'direct', tag: 'direct' }
     ],
     dns: {
@@ -935,28 +1120,230 @@ async function measureNode(node) {
       final: 'dns-local'
     },
     route: {
-      rules: [{ inbound: ['test-in'], outbound: `out-${node.id}` }],
+      rules: targets.map((node) => ({
+        inbound: [`in-${node.id}`],
+        outbound: `out-${node.id}`
+      })),
       final: 'direct',
       auto_detect_interface: true
     }
   };
+}
+
+async function allocateSpeedtestPorts(nodes) {
+  const portByNodeId = new Map();
+  const used = new Set();
+  for (const node of nodes) {
+    let port = await getFreePort();
+    while (used.has(port)) port = await getFreePort();
+    used.add(port);
+    portByNodeId.set(node.id, port);
+  }
+  return portByNodeId;
+}
+
+function socks5hConnect(port, target) {
+  return new Promise((resolve, reject) => {
+    const targetPort = toInt(target.port, target.protocol === 'https:' ? 443 : 80);
+    const domain = Buffer.from(target.hostname);
+    if (!domain.length || domain.length > 255) {
+      reject(new Error('DNS 解析失败'));
+      return;
+    }
+
+    const socket = net.connect({ host: '127.0.0.1', port });
+    let buffer = Buffer.alloc(0);
+    let stage = 'method';
+    let settled = false;
+
+    const cleanup = () => {
+      socket.removeListener('data', onData);
+      socket.removeListener('error', onError);
+      socket.removeListener('timeout', onTimeout);
+      socket.removeListener('close', onClose);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      socket.setTimeout(0);
+      resolve(socket);
+    };
+    const sendConnectRequest = () => {
+      const request = Buffer.alloc(7 + domain.length);
+      request[0] = 0x05;
+      request[1] = 0x01;
+      request[2] = 0x00;
+      request[3] = 0x03;
+      request[4] = domain.length;
+      domain.copy(request, 5);
+      request.writeUInt16BE(targetPort, 5 + domain.length);
+      socket.write(request);
+    };
+    const onData = (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      if (stage === 'method') {
+        if (buffer.length < 2) return;
+        if (buffer[0] !== 0x05 || buffer[1] !== 0x00) {
+          fail(new Error('SOCKS authentication failed'));
+          return;
+        }
+        buffer = buffer.slice(2);
+        stage = 'connect';
+        sendConnectRequest();
+      }
+      if (stage === 'connect') {
+        if (buffer.length < 5) return;
+        if (buffer[1] !== 0x00) {
+          fail(new Error(socksReplyMessage(buffer[1])));
+          return;
+        }
+        const atyp = buffer[3];
+        let expectedLength = 0;
+        if (atyp === 0x01) expectedLength = 10;
+        if (atyp === 0x03) expectedLength = 5 + buffer[4] + 2;
+        if (atyp === 0x04) expectedLength = 22;
+        if (!expectedLength) {
+          fail(new Error('SOCKS address type not supported'));
+          return;
+        }
+        if (buffer.length >= expectedLength) done();
+      }
+    };
+    const onError = (error) => fail(error);
+    const onTimeout = () => fail(new Error('timeout'));
+    const onClose = () => fail(new Error('connection reset'));
+
+    socket.setTimeout(TEST_TIMEOUT_MS);
+    socket.once('connect', () => socket.write(Buffer.from([0x05, 0x01, 0x00])));
+    socket.on('data', onData);
+    socket.once('error', onError);
+    socket.once('timeout', onTimeout);
+    socket.once('close', onClose);
+  });
+}
+
+function readHttpStatus(stream, requestText, start) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    let settled = false;
+    const cleanup = () => {
+      stream.removeListener('data', onData);
+      stream.removeListener('error', onError);
+      stream.removeListener('timeout', onTimeout);
+      stream.removeListener('end', onEnd);
+    };
+    const finish = (error, status) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve(status);
+    };
+    const onData = (chunk) => {
+      buffer += chunk.toString('utf8');
+      const match = buffer.match(/^HTTP\/\d(?:\.\d)?\s+(\d+)/);
+      if (match) finish(null, toInt(match[1], 0));
+    };
+    const onError = (error) => finish(error);
+    const onTimeout = () => finish(new Error('timeout'));
+    const onEnd = () => finish(new Error('connection reset'));
+
+    stream.setTimeout(TEST_TIMEOUT_MS);
+    stream.on('data', onData);
+    stream.once('error', onError);
+    stream.once('timeout', onTimeout);
+    stream.once('end', onEnd);
+    start(() => stream.write(requestText));
+  });
+}
+
+async function probeSocks5hProxy(port, rawUrl) {
+  const target = new URL(rawUrl);
+  const started = Date.now();
+  const socket = await socks5hConnect(port, target);
+  const requestPath = `${target.pathname || '/'}${target.search || ''}`;
+  const requestText = `GET ${requestPath} HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\n\r\n`;
+  try {
+    let status = 0;
+    if (target.protocol === 'https:') {
+      const secure = tls.connect({
+        socket,
+        servername: target.hostname,
+        rejectUnauthorized: false
+      });
+      try {
+        status = await readHttpStatus(secure, requestText, (write) => secure.once('secureConnect', write));
+      } finally {
+        secure.destroy();
+      }
+    } else {
+      status = await readHttpStatus(socket, requestText, (write) => write());
+    }
+    if (status < 200 || status >= 400) {
+      throw new Error(`HTTP ${status}`);
+    }
+    return Date.now() - started;
+  } finally {
+    socket.destroy();
+  }
+}
+
+async function measureNodeViaPort(node, port, options = {}) {
+  const sampleCount = options.sampleCount || SPEEDTEST_SAMPLE_COUNT;
+  const intervalMs = options.intervalMs ?? SPEEDTEST_SAMPLE_INTERVAL_MS;
+  const testUrl = options.testUrl || state.settings.testUrl;
+  const latencies = [];
+  const errors = [];
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    try {
+      latencies.push(await probeSocks5hProxy(port, testUrl));
+    } catch (error) {
+      errors.push(normalizeProbeError(error));
+    }
+    if (index < sampleCount - 1) await sleep(intervalMs);
+  }
+
+  if (latencies.length) {
+    return { id: node.id, ok: true, latencyMs: Math.min(...latencies) };
+  }
+  return {
+    id: node.id,
+    ok: false,
+    error: [...new Set(errors)].join(' / ') || '测速失败'
+  };
+}
+
+async function runSpeedtestRuntime(nodes, options = {}) {
+  const targets = (nodes || []).filter(Boolean);
+  if (!targets.length) return [];
+
+  const portByNodeId = options.portByNodeId || await allocateSpeedtestPorts(targets);
+  const configPath = path.join(TEMP_DIR, `speedtest-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`);
+  const config = buildSpeedtestConfig(targets, portByNodeId);
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
   const child = spawn(state.settings.singBoxPath, ['run', '-c', configPath], { windowsHide: true });
   const stderr = [];
+  child.stdout.on('data', (data) => stderr.push(String(data)));
   child.stderr.on('data', (data) => stderr.push(String(data)));
   child.once('error', (error) => stderr.push(error.message));
+
   try {
-    await waitForPort(port, '127.0.0.1', 5000);
-    const latencyMs = await probeProxy(port, state.settings.testUrl);
-    return { id: node.id, ok: true, latencyMs };
+    await Promise.all([...portByNodeId.values()].map((port) => waitForPort(port, '127.0.0.1', 5000)));
+    await sleep(options.warmupMs ?? SPEEDTEST_WARMUP_MS);
+    return await runLimited(targets, options.concurrency || SPEEDTEST_CONCURRENCY, (node) => measureNodeViaPort(node, portByNodeId.get(node.id), options));
   } catch (error) {
-    const detail = stderr.join('\n')
-      .split(/\r?\n/)
-      .map((line) => stripAnsi(line).trim())
-      .filter((line) => line && !/read http request: EOF/i.test(line))
-      .slice(-2)
-      .join(' | ');
-    return { id: node.id, ok: false, error: detail || error.message || '测试失败' };
+    const message = compactRuntimeError(stderr, error);
+    return targets.map((node) => ({ id: node.id, ok: false, error: message }));
   } finally {
     await stopProcess(child, 1500);
     try {
@@ -965,6 +1352,31 @@ async function measureNode(node) {
       // best effort
     }
   }
+}
+
+function applySpeedtestResultsToNodes(nodes, results, now = new Date().toISOString()) {
+  for (const result of results) {
+    const node = nodes.find((item) => item.id === result.id);
+    if (!node) continue;
+    node.lastTestAt = now;
+    if (result.ok) {
+      node.status = 'up';
+      node.autoDisabled = false;
+      node.latencyMs = result.latencyMs;
+      node.error = null;
+      node.failCount = 0;
+      node.successCount = Math.max(0, toInt(node.successCount, 0)) + 1;
+    } else {
+      const failCount = Math.max(0, toInt(node.failCount, 0)) + 1;
+      node.status = 'down';
+      node.autoDisabled = failCount >= AUTO_DISABLE_FAIL_THRESHOLD;
+      node.latencyMs = null;
+      node.error = result.error || '测速失败';
+      node.failCount = failCount;
+      node.successCount = 0;
+    }
+  }
+  return nodes;
 }
 
 async function runLimited(items, limit, worker) {
@@ -990,24 +1402,9 @@ async function testNodes(nodeIds = []) {
   testing = true;
   const before = runtimeSignature();
   try {
-    const results = await runLimited(targets, 3, measureNode);
+    const results = await runSpeedtestRuntime(targets);
     const now = new Date().toISOString();
-    for (const result of results) {
-      const node = state.nodes.find((item) => item.id === result.id);
-      if (!node) continue;
-      node.lastTestAt = now;
-      if (result.ok) {
-        node.status = 'up';
-        node.autoDisabled = false;
-        node.latencyMs = result.latencyMs;
-        node.error = null;
-      } else {
-        node.status = 'down';
-        node.autoDisabled = true;
-        node.latencyMs = null;
-        node.error = result.error || '测速失败';
-      }
-    }
+    applySpeedtestResultsToNodes(state.nodes, results, now);
     state.settings.lastTestAt = now;
     applyGroupSelections();
     saveState();
@@ -1387,11 +1784,18 @@ function parseProxyLink(line, groupName = '') {
         port: data.port,
         uuid: data.id,
         alterId: data.aid,
-        security: data.tls === 'tls' ? 'tls' : normalizeString(data.scy) || 'auto',
+        security: normalizeString(data.scy || data.security) || 'auto',
+        tls: normalizeString(data.tls).toLowerCase() === 'tls',
         sni: data.sni || data.host || data.add,
+        alpn: data.alpn,
+        fingerprint: data.fp || data.fingerprint,
         transport: data.net,
         wsPath: data.path,
         wsHost: data.host,
+        packetEncoding: data.packet_encoding || data.packetEncoding,
+        maxEarlyData: data.ed || data.max_early_data,
+        earlyDataHeaderName: data.early_data_header_name,
+        serviceName: data.serviceName || data.service_name,
         group: groupName
       });
     }
@@ -1412,15 +1816,27 @@ function parseProxyLink(line, groupName = '') {
       group: groupName,
       security: normalizeString(params.get('security') || params.get('tls')),
       sni: normalizeString(params.get('sni') || params.get('peer') || params.get('host')),
+      alpn: normalizeString(params.get('alpn')),
       transport: normalizeString(params.get('type') || params.get('transport')),
       wsPath: normalizeString(params.get('path')),
       wsHost: normalizeString(params.get('host')),
+      maxEarlyData: normalizeString(params.get('ed') || params.get('max_early_data')),
+      earlyDataHeaderName: normalizeString(params.get('early_data_header_name') || params.get('earlyDataHeaderName') || params.get('eh')),
       serviceName: normalizeString(params.get('serviceName') || params.get('service_name')),
       pbk: normalizeString(params.get('pbk')),
       sid: normalizeString(params.get('sid')),
+      spx: normalizeString(params.get('spx') || params.get('spiderX') || params.get('spider_x')),
       flow: normalizeString(params.get('flow')),
       fingerprint: normalizeString(params.get('fp') || params.get('fingerprint') || params.get('utls')),
-      insecure: ['1', 'true', 'yes'].includes(normalizeString(params.get('allowInsecure') || params.get('insecure')).toLowerCase())
+      packetEncoding: normalizeString(params.get('packet_encoding') || params.get('packetEncoding')),
+      obfs: normalizeString(params.get('obfs')),
+      obfsPassword: normalizeString(params.get('obfs-password') || params.get('obfs_password') || params.get('obfsPassword')),
+      upMbps: normalizeString(params.get('up_mbps') || params.get('upmbps') || params.get('up')),
+      downMbps: normalizeString(params.get('down_mbps') || params.get('downmbps') || params.get('down')),
+      heartbeat: normalizeString(params.get('heartbeat')),
+      congestionControl: normalizeString(params.get('congestion_control') || params.get('congestion') || params.get('cc')),
+      udpRelayMode: normalizeString(params.get('udp_relay_mode') || params.get('udp-relay-mode')),
+      insecure: ['1', 'true', 'yes'].includes(normalizeString(params.get('allowInsecure') || params.get('insecure') || params.get('skip-cert-verify')).toLowerCase())
     };
 
     if (scheme === 'socks' || scheme === 'socks5') {
@@ -1443,7 +1859,8 @@ function parseProxyLink(line, groupName = '') {
       return normalizeNode({
         ...common,
         type: 'vless',
-        uuid: decodeURIComponent(url.username || '')
+        uuid: decodeURIComponent(url.username || ''),
+        security: common.security || (common.pbk ? 'reality' : '')
       });
     }
     if (scheme === 'trojan') {
@@ -1459,6 +1876,7 @@ function parseProxyLink(line, groupName = '') {
         ...common,
         type: 'hysteria2',
         password: decodeURIComponent(url.username || ''),
+        alpn: common.alpn || 'h3',
         security: 'tls'
       });
     }
@@ -1468,6 +1886,7 @@ function parseProxyLink(line, groupName = '') {
         type: 'tuic',
         uuid: decodeURIComponent(url.username || ''),
         password: decodeURIComponent(url.password || ''),
+        alpn: common.alpn || 'h3',
         security: 'tls'
       });
     }
@@ -1968,6 +2387,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+if (require.main === module) {
 setInterval(() => {
   void (async () => {
     const subscriptionsChanged = await runGroupSubscriptionSyncIfDue();
@@ -1991,3 +2411,15 @@ server.listen(state.settings.webPort, state.settings.webHost, () => {
   console.log(`Siftlane 正在监听：http://${shownHost}:${state.settings.webPort}`);
   console.log(`数据目录：${DATA_DIR}`);
 });
+
+}
+
+module.exports = {
+  normalizeNode,
+  parseProxyLink,
+  buildNodeOutbound,
+  normalizeWsEarlyData,
+  buildSpeedtestConfig,
+  applySpeedtestResultsToNodes,
+  decideBestSwitch
+};
