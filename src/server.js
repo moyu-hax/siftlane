@@ -1379,6 +1379,17 @@ function applySpeedtestResultsToNodes(nodes, results, now = new Date().toISOStri
   return nodes;
 }
 
+async function runBackgroundTasks() {
+  try {
+    const subscriptionsChanged = await runGroupSubscriptionSyncIfDue();
+    if (subscriptionsChanged) return;
+    await runAutoTestIfDue();
+    await runAutoSwitchIfDue();
+  } catch (error) {
+    appendCoreLog(`后台任务异常：${normalizeString(error?.message) || '未知错误'}`);
+  }
+}
+
 async function runLimited(items, limit, worker) {
   const results = [];
   let index = 0;
@@ -2389,13 +2400,16 @@ const server = http.createServer(async (req, res) => {
 
 if (require.main === module) {
 setInterval(() => {
-  void (async () => {
-    const subscriptionsChanged = await runGroupSubscriptionSyncIfDue();
-    if (subscriptionsChanged) return;
-    await runAutoTestIfDue();
-    await runAutoSwitchIfDue();
-  })();
+  void runBackgroundTasks();
 }, TEST_TICK_MS).unref?.();
+
+process.on('unhandledRejection', (reason) => {
+  appendCoreLog(`未处理的异步错误：${normalizeString(reason?.message || reason) || '未知错误'}`);
+});
+
+process.on('uncaughtException', (error) => {
+  appendCoreLog(`未捕获异常：${normalizeString(error?.message) || '未知错误'}`);
+});
 
 process.once('SIGINT', async () => {
   await stopCore();
@@ -2421,5 +2435,6 @@ module.exports = {
   normalizeWsEarlyData,
   buildSpeedtestConfig,
   applySpeedtestResultsToNodes,
-  decideBestSwitch
+  decideBestSwitch,
+  runBackgroundTasks
 };
