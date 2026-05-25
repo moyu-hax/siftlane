@@ -1354,42 +1354,6 @@ async function runSpeedtestRuntime(nodes, options = {}) {
   }
 }
 
-function applySpeedtestResultsToNodes(nodes, results, now = new Date().toISOString()) {
-  for (const result of results) {
-    const node = nodes.find((item) => item.id === result.id);
-    if (!node) continue;
-    node.lastTestAt = now;
-    if (result.ok) {
-      node.status = 'up';
-      node.autoDisabled = false;
-      node.latencyMs = result.latencyMs;
-      node.error = null;
-      node.failCount = 0;
-      node.successCount = Math.max(0, toInt(node.successCount, 0)) + 1;
-    } else {
-      const failCount = Math.max(0, toInt(node.failCount, 0)) + 1;
-      node.status = 'down';
-      node.autoDisabled = failCount >= AUTO_DISABLE_FAIL_THRESHOLD;
-      node.latencyMs = null;
-      node.error = result.error || '测速失败';
-      node.failCount = failCount;
-      node.successCount = 0;
-    }
-  }
-  return nodes;
-}
-
-async function runBackgroundTasks() {
-  try {
-    const subscriptionsChanged = await runGroupSubscriptionSyncIfDue();
-    if (subscriptionsChanged) return;
-    await runAutoTestIfDue();
-    await runAutoSwitchIfDue();
-  } catch (error) {
-    appendCoreLog(`后台任务异常：${normalizeString(error?.message) || '未知错误'}`);
-  }
-}
-
 async function runLimited(items, limit, worker) {
   const results = [];
   let index = 0;
@@ -2425,16 +2389,3 @@ server.listen(state.settings.webPort, state.settings.webHost, () => {
   console.log(`Siftlane 正在监听：http://${shownHost}:${state.settings.webPort}`);
   console.log(`数据目录：${DATA_DIR}`);
 });
-
-}
-
-module.exports = {
-  normalizeNode,
-  parseProxyLink,
-  buildNodeOutbound,
-  normalizeWsEarlyData,
-  buildSpeedtestConfig,
-  applySpeedtestResultsToNodes,
-  decideBestSwitch,
-  runBackgroundTasks
-};
