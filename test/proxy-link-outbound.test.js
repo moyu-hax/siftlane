@@ -1,8 +1,10 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 process.env.SIFTLANE_DATA_DIR = path.join(os.tmpdir(), `siftlane-test-${process.pid}`);
@@ -24,6 +26,33 @@ function buildParsedOutbound(link) {
     outbound: buildNodeOutbound(node)
   };
 }
+
+test('boots with persisted nodes before normalizing UUID fields', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'siftlane-boot-'));
+  const uuid = '4513ab13-da2c-4f79-acbc-23e8f138e73e';
+  try {
+    fs.writeFileSync(path.join(dataDir, 'state.json'), JSON.stringify({
+      version: 1,
+      settings: {},
+      nodes: [{
+        id: 'boot-node',
+        type: 'vless',
+        name: 'boot node',
+        server: 'boot.example.com',
+        port: 443,
+        uuid: `${uuid}:${uuid}`
+      }],
+      groups: []
+    }));
+
+    execFileSync(process.execPath, [
+      '-e',
+      `process.env.SIFTLANE_DATA_DIR=${JSON.stringify(dataDir)}; require(${JSON.stringify(path.join(__dirname, '..', 'src', 'server.js'))});`
+    ], { stdio: 'pipe' });
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
+});
 
 test('parses VMess TLS without using tls as VMess cipher', () => {
   const payload = Buffer.from(JSON.stringify({

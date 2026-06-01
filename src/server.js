@@ -41,6 +41,9 @@ const core = {
   logs: []
 };
 
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const COMPACT_UUID_PATTERN = /(?:^|[^0-9a-f])([0-9a-f]{32})(?:[^0-9a-f]|$)/i;
+
 let testing = false;
 let suppressCanceledLogsUntil = 0;
 let syncingSubscriptions = false;
@@ -58,9 +61,6 @@ function toInt(value, fallback = 0) {
 function normalizeString(value) {
   return String(value || '').trim();
 }
-
-const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
-const COMPACT_UUID_PATTERN = /(?:^|[^0-9a-f])([0-9a-f]{32})(?:[^0-9a-f]|$)/i;
 
 function normalizeUuid(value) {
   const text = normalizeString(value);
