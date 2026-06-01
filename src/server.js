@@ -59,6 +59,20 @@ function normalizeString(value) {
   return String(value || '').trim();
 }
 
+const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const COMPACT_UUID_PATTERN = /(?:^|[^0-9a-f])([0-9a-f]{32})(?:[^0-9a-f]|$)/i;
+
+function normalizeUuid(value) {
+  const text = normalizeString(value);
+  if (!text) return '';
+  const match = text.match(UUID_PATTERN);
+  if (match) return match[0].toLowerCase();
+  const compactMatch = text.match(COMPACT_UUID_PATTERN);
+  if (!compactMatch) return '';
+  const compact = compactMatch[1].toLowerCase();
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+}
+
 function normalizeGroupName(value) {
   return normalizeString(value) || DEFAULT_GROUP_NAME;
 }
@@ -287,7 +301,7 @@ function normalizeNode(node) {
     method: normalizeString(node.method),
     plugin: normalizeString(node.plugin),
     pluginOpts: normalizeString(node.pluginOpts || node.plugin_opts || node.pluginOptions),
-    uuid: normalizeString(node.uuid),
+    uuid: normalizeUuid(node.uuid),
     alterId: toInt(node.alterId, 0),
     security: normalizedSecurity,
     tls: tlsEnabled,
@@ -462,13 +476,25 @@ function nodeUsable(node) {
   return Boolean(node && node.enabled !== false && !node.autoDisabled);
 }
 
+function nodeConfigError(node) {
+  const type = normalizeString(node?.type).toLowerCase();
+  if (['vmess', 'vless', 'tuic'].includes(type) && !normalizeUuid(node?.uuid)) {
+    return 'UUID invalid';
+  }
+  return '';
+}
+
+function nodeConfigurable(node) {
+  return Boolean(nodeUsable(node) && !nodeConfigError(node));
+}
+
 function getGroupNodes(group) {
   const ids = new Set(group?.nodeIds || []);
   return state.nodes.filter((node) => ids.has(node.id));
 }
 
 function chooseGroupNode(group) {
-  const usable = getGroupNodes(group).filter(nodeUsable);
+  const usable = getGroupNodes(group).filter(nodeConfigurable);
   if (!usable.length) return null;
   if (usable.some((node) => node.id === group.selectedNodeId)) {
     return usable.find((node) => node.id === group.selectedNodeId);
@@ -492,7 +518,7 @@ function applyGroupSelections() {
 }
 
 function getUsableNodes() {
-  return state.nodes.filter(nodeUsable);
+  return state.nodes.filter(nodeConfigurable);
 }
 
 function getActiveGroup() {
@@ -501,7 +527,7 @@ function getActiveGroup() {
 
 function getManualNode() {
   const selected = state.nodes.find((node) => node.id === state.settings.manualNodeId);
-  return nodeUsable(selected) ? selected : (getUsableNodes()[0] || null);
+  return nodeConfigurable(selected) ? selected : (getUsableNodes()[0] || null);
 }
 
 function getCurrentOutboundNode() {
@@ -515,7 +541,7 @@ function getCurrentOutboundNode() {
 function getNextSwitchAt() {
   if (state.settings.switchMode !== 'auto' || core.status !== 'running') return null;
   const activeGroup = getActiveGroup();
-  if (!activeGroup || !getGroupNodes(activeGroup).some(nodeUsable)) return null;
+  if (!activeGroup || !getGroupNodes(activeGroup).some(nodeConfigurable)) return null;
   const intervalMs = state.settings.switchPolicy === 'best'
     ? BEST_SWITCH_COOLDOWN_MS
     : state.settings.autoSwitchIntervalMin * 60 * 1000;
@@ -527,7 +553,7 @@ function getNextSwitchAt() {
 function rotateActiveGroupSelection() {
   const group = getActiveGroup();
   if (!group) return null;
-  const usable = getGroupNodes(group).filter(nodeUsable);
+  const usable = getGroupNodes(group).filter(nodeConfigurable);
   if (!usable.length) {
     group.selectedNodeId = null;
     return null;
@@ -545,12 +571,12 @@ function latencyValue(node) {
 
 function getBestLatencyNode(nodes, excludeId = null) {
   return (nodes || [])
-    .filter((node) => nodeUsable(node) && node.id !== excludeId && node.status === 'up' && latencyValue(node) !== null)
+    .filter((node) => nodeConfigurable(node) && node.id !== excludeId && node.status === 'up' && latencyValue(node) !== null)
     .sort((a, b) => latencyValue(a) - latencyValue(b))[0] || null;
 }
 
 function decideBestSwitch({ nodes, selectedNodeId, lastSwitchAt, nowMs = Date.now() }) {
-  const usable = (nodes || []).filter(nodeUsable);
+  const usable = (nodes || []).filter(nodeConfigurable);
   if (!usable.length) return null;
 
   const current = usable.find((node) => node.id === selectedNodeId) || null;
@@ -639,7 +665,7 @@ function runtimeSignature() {
     groups: state.groups.map((group) => ({
       id: group.id,
       selectedNodeId: group.selectedNodeId,
-      usableIds: getGroupNodes(group).filter(nodeUsable).map((node) => node.id)
+      usableIds: getGroupNodes(group).filter(nodeConfigurable).map((node) => node.id)
     }))
   });
 }
@@ -843,12 +869,16 @@ function buildNodeOutbound(node) {
       if (node.pluginOpts) outbound.plugin_opts = node.pluginOpts;
     }
   } else if (node.type === 'vmess') {
-    outbound.uuid = node.uuid;
+    const uuid = normalizeUuid(node.uuid);
+    if (!uuid) return null;
+    outbound.uuid = uuid;
     outbound.security = node.security && !['tls', 'reality'].includes(node.security) ? node.security : 'auto';
     outbound.alter_id = node.alterId || 0;
     outbound.packet_encoding = node.packetEncoding || 'packetaddr';
   } else if (node.type === 'vless') {
-    outbound.uuid = node.uuid;
+    const uuid = normalizeUuid(node.uuid);
+    if (!uuid) return null;
+    outbound.uuid = uuid;
     outbound.packet_encoding = node.packetEncoding || 'xudp';
     if (node.flow) outbound.flow = node.flow;
   } else if (node.type === 'trojan') {
@@ -863,7 +893,9 @@ function buildNodeOutbound(node) {
     if (node.downMbps) outbound.down_mbps = node.downMbps;
     if (node.heartbeat) outbound.heartbeat = node.heartbeat;
   } else if (node.type === 'tuic') {
-    outbound.uuid = node.uuid;
+    const uuid = normalizeUuid(node.uuid);
+    if (!uuid) return null;
+    outbound.uuid = uuid;
     outbound.password = node.password;
     outbound.congestion_control = node.congestionControl || 'bbr';
     if (node.udpRelayMode) outbound.udp_relay_mode = node.udpRelayMode;
@@ -896,10 +928,10 @@ function buildNodeOutbound(node) {
 
 function buildRuntimeConfig() {
   applyGroupSelections();
-  const usableNodes = state.nodes.filter(nodeUsable);
-  const outbounds = usableNodes.map(buildNodeOutbound);
+  const usableNodes = state.nodes.filter(nodeConfigurable);
+  const outbounds = usableNodes.map(buildNodeOutbound).filter(Boolean);
   const groupOutbounds = state.groups.map((group) => {
-    const usableIds = getGroupNodes(group).filter(nodeUsable).map((node) => node.id);
+    const usableIds = getGroupNodes(group).filter(nodeConfigurable).map((node) => node.id);
     if (!usableIds.length) return null;
     const selected = usableIds.includes(group.selectedNodeId) ? group.selectedNodeId : usableIds[0];
     return {
@@ -910,7 +942,7 @@ function buildRuntimeConfig() {
     };
   }).filter(Boolean);
   const activeNode = getCurrentOutboundNode();
-  const activeOutbound = activeNode ? `out-${activeNode.id}` : 'direct';
+  const activeOutbound = activeNode && nodeConfigurable(activeNode) ? `out-${activeNode.id}` : 'direct';
 
   return {
     log: { level: 'warn' },
@@ -1102,7 +1134,7 @@ function compactRuntimeError(stderr, error) {
 }
 
 function buildSpeedtestConfig(nodes, portByNodeId) {
-  const targets = (nodes || []).filter(Boolean);
+  const targets = (nodes || []).filter((node) => node && !nodeConfigError(node));
   return {
     log: { level: 'error' },
     inbounds: targets.map((node) => ({
@@ -1112,7 +1144,7 @@ function buildSpeedtestConfig(nodes, portByNodeId) {
       listen_port: portByNodeId.get(node.id)
     })),
     outbounds: [
-      ...targets.map(buildNodeOutbound),
+      ...targets.map(buildNodeOutbound).filter(Boolean),
       { type: 'direct', tag: 'direct' }
     ],
     dns: {
@@ -1323,7 +1355,7 @@ async function measureNodeViaPort(node, port, options = {}) {
 }
 
 async function runSpeedtestRuntime(nodes, options = {}) {
-  const targets = (nodes || []).filter(Boolean);
+  const targets = (nodes || []).filter((node) => node && !nodeConfigError(node));
   if (!targets.length) return [];
 
   const portByNodeId = options.portByNodeId || await allocateSpeedtestPorts(targets);
@@ -1413,7 +1445,14 @@ async function testNodes(nodeIds = []) {
   testing = true;
   const before = runtimeSignature();
   try {
-    const results = await runSpeedtestRuntime(targets);
+    const invalidResults = targets
+      .map((node) => ({ node, error: nodeConfigError(node) }))
+      .filter((item) => item.error)
+      .map((item) => ({ id: item.node.id, ok: false, error: item.error }));
+    const results = [
+      ...invalidResults,
+      ...await runSpeedtestRuntime(targets)
+    ];
     const now = new Date().toISOString();
     applySpeedtestResultsToNodes(state.nodes, results, now);
     state.settings.lastTestAt = now;

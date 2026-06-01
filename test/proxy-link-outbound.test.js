@@ -74,6 +74,39 @@ test('builds VLESS Reality outbound with fingerprint and spider_x', () => {
   });
 });
 
+test('cleans duplicated UUID values before building UUID based outbounds', () => {
+  const uuid = '4513ab13-da2c-4f79-acbc-23e8f138e73e';
+  const duplicated = `${uuid}:${uuid}`;
+  const node = normalizeNode({
+    id: 'dup-vless',
+    type: 'vless',
+    server: 'dup.example.com',
+    port: 443,
+    uuid: duplicated
+  });
+  assert.equal(node.uuid, uuid);
+  assert.equal(buildNodeOutbound(node).uuid, uuid);
+
+  const payload = Buffer.from(JSON.stringify({
+    ps: 'dup vmess',
+    add: 'dup-vmess.example.com',
+    port: '443',
+    id: duplicated
+  })).toString('base64');
+  const parsed = parseProxyLink(`vmess://${payload}`, 'test-group');
+  assert.equal(parsed.uuid, uuid);
+  assert.equal(buildNodeOutbound(parsed).uuid, uuid);
+
+  const compact = normalizeNode({
+    id: 'compact-vless',
+    type: 'vless',
+    server: 'compact.example.com',
+    port: 443,
+    uuid: '4513ab13da2c4f79acbc23e8f138e73e'
+  });
+  assert.equal(compact.uuid, uuid);
+});
+
 test('cleans WebSocket early data from path and maps it to transport fields', () => {
   const link = 'vless://33333333-3333-4333-8333-333333333333@ws.example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Fvless%3Fed%3D2560%26foo%3Dbar&packet_encoding=packetaddr&early_data_header_name=X-Early-Data#ws';
   const { node, outbound } = buildParsedOutbound(link);
@@ -184,6 +217,35 @@ test('builds one speedtest config with one socks inbound per node', () => {
     { inbound: ['in-node-b'], outbound: 'out-node-b' }
   ]);
   assert.deepEqual(config.outbounds.map((item) => item.tag), ['out-node-a', 'out-node-b', 'direct']);
+});
+
+test('speedtest config skips UUID based nodes with invalid UUID', () => {
+  const bad = normalizeNode({
+    id: 'bad-vless',
+    type: 'vless',
+    server: 'bad.example.com',
+    port: 443,
+    uuid: 'not-a-valid-uuid'
+  });
+  const good = normalizeNode({
+    id: 'good-vless',
+    type: 'vless',
+    server: 'good.example.com',
+    port: 443,
+    uuid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  });
+  const ports = new Map([
+    ['bad-vless', 19011],
+    ['good-vless', 19012]
+  ]);
+
+  const config = buildSpeedtestConfig([bad, good], ports);
+
+  assert.deepEqual(config.inbounds.map((item) => item.tag), ['in-good-vless']);
+  assert.deepEqual(config.route.rules, [
+    { inbound: ['in-good-vless'], outbound: 'out-good-vless' }
+  ]);
+  assert.deepEqual(config.outbounds.map((item) => item.tag), ['out-good-vless', 'direct']);
 });
 
 test('updates speedtest state with failure threshold and success recovery', () => {
