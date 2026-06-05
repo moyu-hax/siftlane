@@ -24,6 +24,7 @@ const SPEEDTEST_SAMPLE_COUNT = 2;
 const SPEEDTEST_SAMPLE_INTERVAL_MS = 100;
 const SPEEDTEST_CONCURRENCY = 5;
 const SPEEDTEST_WARMUP_MS = 1000;
+const SPEEDTEST_RECHECK_CONCURRENCY = 1;
 const AUTO_DISABLE_FAIL_THRESHOLD = 3;
 const BEST_SWITCH_MIN_IMPROVEMENT_MS = 80;
 const BEST_SWITCH_COOLDOWN_MS = 5 * 60 * 1000;
@@ -1133,6 +1134,11 @@ function compactRuntimeError(stderr, error) {
   return normalizeProbeError(detail || error);
 }
 
+function isTransientSpeedtestError(error) {
+  const text = normalizeProbeError(error).toLowerCase();
+  return /tls|ssl|鎻℃墜|握手|timeout|瓒呮椂|超时|reset|重置|socket disconnected|bad record mac/i.test(text);
+}
+
 function buildSpeedtestConfig(nodes, portByNodeId) {
   const targets = (nodes || []).filter((node) => node && !nodeConfigError(node));
   return {
@@ -1198,6 +1204,7 @@ function socks5hConnect(port, target) {
       if (settled) return;
       settled = true;
       cleanup();
+      socket.on('error', () => {});
       socket.destroy();
       reject(error);
     };
@@ -1205,6 +1212,7 @@ function socks5hConnect(port, target) {
       if (settled) return;
       settled = true;
       cleanup();
+      socket.on('error', () => {});
       socket.setTimeout(0);
       resolve(socket);
     };
@@ -1287,7 +1295,9 @@ function readHttpStatus(stream, requestText, start) {
     const onError = (error) => finish(error);
     const onTimeout = () => finish(new Error('timeout'));
     const onEnd = () => finish(new Error('connection reset'));
+    const ignoreLateError = () => {};
 
+    stream.on('error', ignoreLateError);
     stream.setTimeout(TEST_TIMEOUT_MS);
     stream.on('data', onData);
     stream.once('error', onError);
@@ -1386,6 +1396,29 @@ async function runSpeedtestRuntime(nodes, options = {}) {
   }
 }
 
+async function recheckTransientSpeedtestFailures(nodes, results, options = {}) {
+  const targets = (nodes || []).filter((node) => node && !nodeConfigError(node));
+  if (targets.length <= 1) return results;
+
+  const byId = new Map(targets.map((node) => [node.id, node]));
+  const retryItems = (results || [])
+    .filter((result) => !result.ok && byId.has(result.id) && isTransientSpeedtestError(result.error));
+  if (!retryItems.length) return results;
+
+  const retryResults = await runLimited(retryItems, options.recheckConcurrency || SPEEDTEST_RECHECK_CONCURRENCY, async (item) => {
+    const [result] = await runSpeedtestRuntime([byId.get(item.id)], {
+      ...options,
+      concurrency: 1,
+      sampleCount: Math.max(3, options.sampleCount || SPEEDTEST_SAMPLE_COUNT),
+      warmupMs: Math.max(1500, options.warmupMs || SPEEDTEST_WARMUP_MS)
+    });
+    return result ? { ...result, rechecked: true } : item;
+  });
+
+  const retryById = new Map(retryResults.map((result) => [result.id, result]));
+  return results.map((result) => retryById.get(result.id) || result);
+}
+
 function applySpeedtestResultsToNodes(nodes, results, now = new Date().toISOString()) {
   for (const result of results) {
     const node = nodes.find((item) => item.id === result.id);
@@ -1400,9 +1433,13 @@ function applySpeedtestResultsToNodes(nodes, results, now = new Date().toISOStri
       node.successCount = Math.max(0, toInt(node.successCount, 0)) + 1;
     } else {
       const failCount = Math.max(0, toInt(node.failCount, 0)) + 1;
-      node.status = 'down';
-      node.autoDisabled = failCount >= AUTO_DISABLE_FAIL_THRESHOLD;
-      node.latencyMs = null;
+      const disableNow = failCount >= AUTO_DISABLE_FAIL_THRESHOLD;
+      const keepPreviousUp = !disableNow && isTransientSpeedtestError(result.error) && node.status === 'up' && Number.isFinite(Number(node.latencyMs));
+      if (!keepPreviousUp) {
+        node.status = 'down';
+        node.latencyMs = null;
+      }
+      node.autoDisabled = disableNow;
       node.error = result.error || '测速失败';
       node.failCount = failCount;
       node.successCount = 0;
@@ -1449,9 +1486,10 @@ async function testNodes(nodeIds = []) {
       .map((node) => ({ node, error: nodeConfigError(node) }))
       .filter((item) => item.error)
       .map((item) => ({ id: item.node.id, ok: false, error: item.error }));
+    const speedtestResults = await recheckTransientSpeedtestFailures(targets, await runSpeedtestRuntime(targets));
     const results = [
       ...invalidResults,
-      ...await runSpeedtestRuntime(targets)
+      ...speedtestResults
     ];
     const now = new Date().toISOString();
     applySpeedtestResultsToNodes(state.nodes, results, now);

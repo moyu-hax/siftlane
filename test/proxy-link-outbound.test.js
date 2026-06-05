@@ -312,6 +312,38 @@ test('updates speedtest state with failure threshold and success recovery', () =
   assert.equal(nodes[0].error, null);
 });
 
+test('transient batch failures keep previously usable node until threshold', () => {
+  const now = '2026-06-05T00:00:00.000Z';
+  const nodes = [
+    normalizeNode({
+      id: 'node-transient',
+      type: 'trojan',
+      server: 'transient.example.com',
+      port: 443,
+      password: 'pass',
+      security: 'tls',
+      status: 'up',
+      latencyMs: 88
+    })
+  ];
+
+  applySpeedtestResultsToNodes(nodes, [{ id: 'node-transient', ok: false, error: 'TLS 鎻℃墜澶辫触' }], now);
+  assert.equal(nodes[0].status, 'up');
+  assert.equal(nodes[0].latencyMs, 88);
+  assert.equal(nodes[0].autoDisabled, false);
+  assert.equal(nodes[0].failCount, 1);
+
+  applySpeedtestResultsToNodes(nodes, [{ id: 'node-transient', ok: false, error: 'TLS 鎻℃墜澶辫触' }], now);
+  assert.equal(nodes[0].status, 'up');
+  assert.equal(nodes[0].latencyMs, 88);
+  assert.equal(nodes[0].autoDisabled, false);
+
+  applySpeedtestResultsToNodes(nodes, [{ id: 'node-transient', ok: false, error: 'TLS 鎻℃墜澶辫触' }], now);
+  assert.equal(nodes[0].status, 'down');
+  assert.equal(nodes[0].latencyMs, null);
+  assert.equal(nodes[0].autoDisabled, true);
+});
+
 function makeSwitchNode(id, latencyMs, extra = {}) {
   return normalizeNode({
     id,
