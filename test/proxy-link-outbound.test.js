@@ -83,19 +83,19 @@ test('parses VMess TLS without using tls as VMess cipher', () => {
   assert.equal(outbound.transport.early_data_header_name, 'Sec-WebSocket-Protocol');
 });
 
-test('builds VLESS Reality outbound with fingerprint and spider_x', () => {
+test('builds VLESS Reality outbound without unsupported spider_x', () => {
   const link = 'vless://22222222-2222-4222-8222-222222222222@reality.example.com:443?encryption=none&security=reality&type=tcp&sni=www.tesla.com&fp=firefox&pbk=PUBLICKEY&sid=0b&spx=%2F&flow=xtls-rprx-vision#reality';
   const { node, outbound } = buildParsedOutbound(link);
 
   assert.equal(node.security, 'reality');
+  assert.equal(node.spx, '/');
   assert.equal(node.packetEncoding, '');
   assert.equal(outbound.packet_encoding, 'xudp');
   assert.equal(outbound.flow, 'xtls-rprx-vision');
   assert.deepEqual(outbound.tls.reality, {
     enabled: true,
     public_key: 'PUBLICKEY',
-    short_id: '0b',
-    spider_x: '/'
+    short_id: '0b'
   });
   assert.deepEqual(outbound.tls.utls, {
     enabled: true,

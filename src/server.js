@@ -829,7 +829,6 @@ function buildTlsConfig(node) {
       public_key: node.pbk
     };
     if (node.sid) tlsConfig.reality.short_id = node.sid;
-    if (node.spx) tlsConfig.reality.spider_x = node.spx;
   }
 
   if (!['hysteria2', 'tuic'].includes(node.type)) {
